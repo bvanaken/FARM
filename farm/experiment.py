@@ -71,6 +71,8 @@ def run_experiment(args):
 
     data_silo = DataSilo(
         processor=processor,
+        caching=True,
+        cache_path=Path(args.general.cache_dir),
         batch_size=args.parameter.batch_size,
         distributed=distributed,
     )
