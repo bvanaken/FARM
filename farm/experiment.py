@@ -59,7 +59,7 @@ def run_experiment(args):
 
     # Prepare Data
     tokenizer = Tokenizer.load(
-        args.parameter.model, do_lower_case=args.parameter.lower_case
+        args.parameter.model, tokenizer_class=args.parameter.tokenizer_class, do_lower_case=args.parameter.lower_case
     )
 
     processor = Processor.load(
@@ -81,7 +81,8 @@ def run_experiment(args):
     if args.parameter.balance_classes:
         task_names = list(processor.tasks.keys())
         if len(task_names) > 1:
-            raise NotImplementedError(f"Balancing classes is currently not supported for multitask experiments. Got tasks:  {task_names} ")
+            raise NotImplementedError(
+                f"Balancing classes is currently not supported for multitask experiments. Got tasks:  {task_names} ")
         class_weights = data_silo.calculate_class_weights(task_name=task_names[0])
 
     model = get_adaptive_model(
@@ -120,7 +121,8 @@ def run_experiment(args):
             metric=args.task.metric,
             mode=args.early_stopping.mode,
             save_dir=Path(f"{args.general.output_dir}/{model_name}_early_stopping"),  # where to save the best model
-            patience=args.early_stopping.patience    # number of evaluations to wait for improvement before terminating the training
+            patience=args.early_stopping.patience
+            # number of evaluations to wait for improvement before terminating the training
         )
     else:
         early_stopping = None
@@ -147,14 +149,15 @@ def run_experiment(args):
 
     ml_logger.end_run()
 
+
 def get_adaptive_model(
-    lm_output_type,
-    prediction_heads,
-    layer_dims,
-    model,
-    device,
-    embeds_dropout_prob,
-    class_weights=None,
+        lm_output_type,
+        prediction_heads,
+        layer_dims,
+        model,
+        device,
+        embeds_dropout_prob,
+        class_weights=None,
 ):
     parsed_lm_output_types = lm_output_type.split(",")
     language_model = LanguageModel.load(model)

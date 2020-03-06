@@ -47,7 +47,6 @@ try:
 except (AttributeError, ImportError):
     FARM_CACHE = os.getenv("FARM_CACHE", default_cache_path)
 
-
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
@@ -282,6 +281,12 @@ def get_file_extension(path, dot=True, lower=True):
     return ext.lower() if lower else ext
 
 
+def load_experiments(file):
+    args = read_config(file)
+    experiments = unnestConfig(args)
+    return experiments
+
+
 def read_config(path):
     if path:
         with open(path) as json_data_file:
@@ -312,16 +317,16 @@ def unnestConfig(config):
     nestedVals = []
 
     for gk, gv in config.items():
-        if(gk != "task"):
+        if (gk != "task"):
             for k, v in gv.items():
                 if isinstance(v, list):
                     if (
-                        k != "layer_dims"
+                            k != "layer_dims"
                     ):  # exclude layer dims, since it is already a list
                         nestedKeys.append([gk, k])
                         nestedVals.append(v)
                 elif isinstance(v, dict):
-                    logger.warning("Config too deep! Working on %s" %(str(v)))
+                    logger.warning("Config too deep! Working on %s" % (str(v)))
 
     if len(nestedKeys) == 0:
         unnestedConfig = [config]
@@ -348,7 +353,7 @@ def unnestConfig(config):
                 elif len(k) == 2:
                     tempconfig[k[0]][k[1]] = mesh[j][i]  # set nested dictionary keys
                 else:
-                    logger.warning("Config too deep! Working on %s" %(str(k)))
+                    logger.warning("Config too deep! Working on %s" % (str(k)))
             unnestedConfig.append(tempconfig)
 
     return unnestedConfig
