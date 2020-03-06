@@ -188,6 +188,25 @@ class AdaptiveModel(nn.Module):
             all_preds.append(preds)
         return all_preds
 
+
+    def logits_to_probs(self, logits, **kwargs):
+        """
+        Get probabilities from all prediction heads.
+
+        :param logits: logits, can vary in shape and type, depending on task
+        :type logits: object
+        :param label_maps: Maps from label encoding to label string
+        :param label_maps: dict
+        :return: A list of all probabilities from all prediction heads
+        """
+        all_probs = []
+        # collect preds from all heads
+        for head, logits_for_head in zip(self.prediction_heads, logits):
+            probs = head.logits_to_probs(logits=logits_for_head, return_class_probs=False, **kwargs)
+            all_probs.append(probs)
+        return all_probs
+
+
     def prepare_labels(self, **kwargs):
         """
         Label conversion to original label space, per prediction head.

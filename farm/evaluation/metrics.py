@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 from seqeval.metrics import f1_score as ner_f1_score
-from sklearn.metrics import matthews_corrcoef, recall_score, precision_score, f1_score, mean_squared_error, r2_score
+from sklearn.metrics import matthews_corrcoef, recall_score, precision_score, f1_score, mean_squared_error, r2_score, \
+    roc_auc_score
 from farm.utils import flatten_list
 import logging
 
@@ -11,8 +12,10 @@ logger = logging.getLogger(__name__)
 
 registered_metrics = {}
 
+
 def register_metrics(name, implementation):
     registered_metrics[name] = implementation
+
 
 def simple_accuracy(preds, labels):
     # works also with nested lists of different lengths (needed for masked LM task)
@@ -34,6 +37,10 @@ def f1_macro(preds, labels):
     return {"f1_macro": f1_score(y_true=labels, y_pred=preds, average="macro")}
 
 
+def roc_auc(probs, labels):
+    return {"roc_auc": roc_auc_score(y_true=[int(i) for i in labels], y_score=probs)}
+
+
 def pearson_and_spearman(preds, labels):
     pearson_corr = pearsonr(preds, labels)[0]
     spearman_corr = spearmanr(preds, labels)[0]
@@ -43,7 +50,8 @@ def pearson_and_spearman(preds, labels):
         "corr": (pearson_corr + spearman_corr) / 2,
     }
 
-def compute_metrics(metric, preds, labels):
+
+def compute_metrics(metric, preds, probs, labels):
     assert len(preds) == len(labels)
     if metric == "mcc":
         return {"mcc": matthews_corrcoef(labels, preds)}
@@ -64,13 +72,16 @@ def compute_metrics(metric, preds, labels):
         return {"mse": mean_squared_error(preds, labels)}
     elif metric == "r2":
         return {"r2": r2_score(preds, labels)}
+    elif metric == "roc_auc":
+        return roc_auc(probs, labels)
     # elif metric == "masked_accuracy":
     #     return simple_accuracy(preds, labels, ignore=-1)
     elif metric in registered_metrics:
         metric_func = registered_metrics[metric]
-        return metric_func(preds, labels)
+        return metric_func(preds, probs, labels)
     else:
         raise KeyError(metric)
+
 
 def squad_EM(preds, labels):
     # TODO write comment describing function
@@ -81,7 +92,8 @@ def squad_EM(preds, labels):
         curr_labels = labels[doc_idx]
         if (pred_start, pred_end) in curr_labels:
             n_correct += 1
-    return n_correct/n_docs
+    return n_correct / n_docs
+
 
 def squad_f1(preds, labels):
     f1_scores = []
@@ -110,6 +122,7 @@ def squad_f1_single(pred, label):
     recall = n_overlap / len(label_span)
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
+
 
 def squad(preds, labels):
     em = squad_EM(preds=preds, labels=labels)

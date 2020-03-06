@@ -56,6 +56,7 @@ class Evaluator:
         # init empty lists per prediction head
         loss_all = [0 for _ in model.prediction_heads]
         preds_all = [[] for _ in model.prediction_heads]
+        probs_all = [[] for _ in model.prediction_heads]
         label_all = [[] for _ in model.prediction_heads]
         ids_all = [[] for _ in model.prediction_heads]
         passage_start_t_all = [[] for _ in model.prediction_heads]
@@ -70,12 +71,14 @@ class Evaluator:
                 logits = model.forward(**batch)
                 losses_per_head = model.logits_to_loss_per_head(logits=logits, **batch)
                 preds = model.logits_to_preds(logits=logits, **batch)
+                probs = model.logits_to_probs(logits=logits, **batch)
                 labels = model.prepare_labels(**batch)
 
             # stack results of all batches per prediction head
             for head_num, head in enumerate(model.prediction_heads):
                 loss_all[head_num] += np.sum(to_numpy(losses_per_head[head_num]))
                 preds_all[head_num] += list(to_numpy(preds[head_num]))
+                probs_all[head_num] += list(to_numpy(probs[head_num]))
                 label_all[head_num] += list(to_numpy(labels[head_num]))
                 if head.model_type == "span_classification":
                     ids_all[head_num] += list(to_numpy(batch["id"]))
@@ -90,6 +93,7 @@ class Evaluator:
                 mlb = MultiLabelBinarizer(classes=head.label_list)
                 # TODO check why .fit() should be called on predictions, rather than on labels
                 preds_all[head_num] = mlb.fit_transform(preds_all[head_num])
+                probs_all[head_num] = mlb.fit_transform(probs_all[head_num])
                 label_all[head_num] = mlb.transform(label_all[head_num])
             if hasattr(head, 'aggregate_preds'):
                 preds_all[head_num], label_all[head_num] = head.aggregate_preds(preds=preds_all[head_num],
@@ -100,7 +104,7 @@ class Evaluator:
             result = {"loss": loss_all[head_num] / len(self.data_loader.dataset),
                       "task_name": head.task_name}
             result.update(
-                compute_metrics(metric=head.metric, preds=preds_all[head_num], labels=label_all[head_num]
+                compute_metrics(metric=head.metric, preds=preds_all[head_num], probs=probs_all[head_num], labels=label_all[head_num]
                 )
             )
 
