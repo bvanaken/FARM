@@ -21,7 +21,7 @@ class Evaluator:
     """Handles evaluation of a given model over a specified dataset."""
 
     def __init__(
-        self, data_loader, tasks, device, report=True
+            self, data_loader, tasks, device, report=True
     ):
         """
         :param data_loader: The PyTorch DataLoader that will return batches of data from the evaluation dataset
@@ -62,7 +62,7 @@ class Evaluator:
         passage_start_t_all = [[] for _ in model.prediction_heads]
 
         for step, batch in enumerate(
-            tqdm(self.data_loader, desc="Evaluating", mininterval=10)
+                tqdm(self.data_loader, desc="Evaluating", mininterval=10)
         ):
             batch = {key: batch[key].to(self.device) for key in batch}
 
@@ -97,15 +97,17 @@ class Evaluator:
                 label_all[head_num] = mlb.transform(label_all[head_num])
             if hasattr(head, 'aggregate_preds'):
                 preds_all[head_num], label_all[head_num] = head.aggregate_preds(preds=preds_all[head_num],
-                                                                          labels=label_all[head_num],
-                                                                          passage_start_t=passage_start_t_all[head_num],
-                                                                          ids=ids_all[head_num])
+                                                                                labels=label_all[head_num],
+                                                                                passage_start_t=passage_start_t_all[
+                                                                                    head_num],
+                                                                                ids=ids_all[head_num])
 
             result = {"loss": loss_all[head_num] / len(self.data_loader.dataset),
                       "task_name": head.task_name}
             result.update(
-                compute_metrics(metric=head.metric, preds=preds_all[head_num], probs=probs_all[head_num], labels=label_all[head_num]
-                )
+                compute_metrics(metric=head.metric, preds=preds_all[head_num], probs=probs_all[head_num],
+                                labels=label_all[head_num]
+                                )
             )
 
             # Select type of report depending on prediction head output type
@@ -122,7 +124,7 @@ class Evaluator:
                     raise NotImplementedError
 
                 # CHANGE PARAMETERS, not all report_fn accept digits
-                if head.ph_output_type in ["per_sequence_continuous","per_token"]:
+                if head.ph_output_type in ["per_sequence_continuous", "per_token"]:
                     result["report"] = report_fn(
                         label_all[head_num], preds_all[head_num]
                     )
@@ -152,7 +154,7 @@ class Evaluator:
         return all_results
 
     @staticmethod
-    def log_results(results, dataset_name, steps, logging=True, print=True, num_fold=None):
+    def log_results(results, dataset_name, steps, logging=True, print=True, save_path=None, num_fold=None):
         # Print a header
         header = "\n\n"
         header += BUSH_SEP + "\n"
@@ -165,12 +167,16 @@ class Evaluator:
         header += BUSH_SEP + "\n"
         logger.info(header)
 
+        save_log = header
+
         for head_num, head in enumerate(results):
             logger.info("\n _________ {} _________".format(head['task_name']))
             for metric_name, metric_val in head.items():
+                metric_log = None
+
                 # log with ML framework (e.g. Mlflow)
                 if logging:
-                    if not metric_name in ["preds","labels"] and not metric_name.startswith("_"):
+                    if not metric_name in ["preds", "labels"] and not metric_name.startswith("_"):
                         if isinstance(metric_val, numbers.Number):
                             MlLogger.log_metrics(
                                 metrics={
@@ -178,12 +184,22 @@ class Evaluator:
                                 },
                                 step=steps,
                             )
+
                 # print via standard python logger
                 if print:
                     if metric_name == "report":
                         if isinstance(metric_val, str) and len(metric_val) > 8000:
                             metric_val = metric_val[:7500] + "\n ............................. \n" + metric_val[-500:]
-                        logger.info("{}: \n {}".format(metric_name, metric_val))
+                        metric_log = "{}: \n {}".format(metric_name, metric_val)
+                        logger.info(metric_log)
                     else:
                         if not metric_name in ["preds", "labels"] and not metric_name.startswith("_"):
-                            logger.info("{}: {}".format(metric_name, metric_val))
+                            metric_log = "{}: {}".format(metric_name, metric_val)
+                            logger.info(metric_log)
+
+                if save_path and metric_log:
+                    save_log += "\n" + metric_log
+
+        if save_path:
+            with open(save_path, "w", encoding="utf-8") as log_file:
+                log_file.write(save_log)
