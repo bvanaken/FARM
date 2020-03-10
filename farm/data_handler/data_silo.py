@@ -23,9 +23,7 @@ from farm.utils import log_ascii_workers, calc_chunksize
 from farm.utils import get_dict_checksum
 from farm.visual.ascii.images import TRACTOR_SMALL
 
-
 logger = logging.getLogger(__name__)
-
 
 
 class DataSilo:
@@ -35,15 +33,15 @@ class DataSilo:
      """
 
     def __init__(
-        self,
-        processor,
-        batch_size,
-        distributed=False,
-        automatic_loading=True,
-        max_multiprocessing_chunksize=2000,
-        max_processes=128,
-        caching=False,
-        cache_path=Path("cache/data_silo"),
+            self,
+            processor,
+            batch_size,
+            distributed=False,
+            automatic_loading=True,
+            max_multiprocessing_chunksize=2000,
+            max_processes=128,
+            caching=False,
+            cache_path=Path("cache/data_silo"),
     ):
         """
         :param processor: A dataset specific Processor object which will turn input (file or dict) into a Pytorch Dataset.
@@ -119,7 +117,7 @@ class DataSilo:
         # loading dicts from file (default)
         if dicts is None:
             dicts = list(self.processor.file_to_dicts(filename))
-            #shuffle list of dicts here if we later want to have a random dev set splitted from train set
+            # shuffle list of dicts here if we later want to have a random dev set splitted from train set
             if str(self.processor.train_filename) in str(filename):
                 if not self.processor.dev_filename:
                     if self.processor.dev_split > 0.0:
@@ -164,7 +162,7 @@ class DataSilo:
                 for dataset, tensor_names in results:
                     datasets.append(dataset)
                     # update progress bar (last step can have less dicts than actual chunk_size)
-                    pbar.update(min(multiprocessing_chunk_size, pbar.total-pbar.n))
+                    pbar.update(min(multiprocessing_chunk_size, pbar.total - pbar.n))
             concat_datasets = ConcatDataset(datasets)
             return concat_datasets, tensor_names
 
@@ -343,7 +341,7 @@ class DataSilo:
 
         train_dataset, dev_dataset = self.random_split_ConcatDataset(self.data["train"], lengths=[n_train, n_dev])
         self.data["train"] = train_dataset
-        if(len(dev_dataset) > 0):
+        if (len(dev_dataset) > 0):
             self.data["dev"] = dev_dataset
         else:
             logger.warning("No dev set created. Please adjust the dev_split parameter.")
@@ -374,7 +372,7 @@ class DataSilo:
                             f"train/dev split: {lengths}")
 
         assert idx_dataset >= 1, "Dev_split ratio is too large, there is no data in train set. " \
-                             f"Please lower dev_split = {self.processor.dev_split}"
+                                 f"Please lower dev_split = {self.processor.dev_split}"
 
         train = ConcatDataset(ds.datasets[:idx_dataset])
         test = ConcatDataset(ds.datasets[idx_dataset:])
@@ -430,7 +428,7 @@ class DataSilo:
             }
         )
 
-    def calculate_class_weights(self, task_name, source="train"):
+    def calculate_class_weights(self, task_name, source="train", multilabel=False):
         """ For imbalanced datasets, we can calculate class weights that can be used later in the
         loss function of the prediction head to upweight the loss of minorities.
 
@@ -451,8 +449,12 @@ class DataSilo:
             raise Exception("source argument expects one of [\"train\", \"all\"]")
         for dataset in datasets:
             if dataset is not None:
-                observed_labels += [label_list[x[tensor_idx].item()] for x in dataset]
-        #TODO scale e.g. via logarithm to avoid crazy spikes for rare classes
+                if multilabel:
+                    for x in dataset:
+                        observed_labels += np.array(label_list)[x[tensor_idx].bool()].tolist()
+                else:
+                    observed_labels += [label_list[x[tensor_idx].item()] for x in dataset]
+        # TODO scale e.g. via logarithm to avoid crazy spikes for rare classes
         class_weights = list(compute_class_weight("balanced", np.asarray(label_list), observed_labels))
         return class_weights
 
@@ -516,8 +518,8 @@ class StreamingDataSilo:
         elif dataset_name == "dev":
             if self.processor.dev_split > 0.0:
                 raise NotImplemented(
-                            "StreamingDataSilo does not have dev_split implemented. "
-                            "To use dev data, supply a dev filename when creating the Processor."
+                    "StreamingDataSilo does not have dev_split implemented. "
+                    "To use dev data, supply a dev filename when creating the Processor."
                 )
             elif self.processor.dev_filename:
                 filename = self.processor.dev_filename
@@ -689,7 +691,7 @@ class DataSiloForCrossVal:
             ytensors = [t[3][0] for t in ds_all]
             Y = torch.stack(ytensors)
             xval = StratifiedKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
-            xval_split = xval.split(idxs,Y)
+            xval_split = xval.split(idxs, Y)
         else:
             xval = KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
             xval_split = xval.split(idxs)
