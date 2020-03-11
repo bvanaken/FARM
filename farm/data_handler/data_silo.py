@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from functools import partial
 import random
 from pathlib import Path
+import copy
 
 import numpy as np
 from sklearn.utils.class_weight import compute_class_weight
@@ -263,12 +264,19 @@ class DataSilo:
         Get checksum based on a dict to ensure validity of cached DataSilo
         """
         # keys in the dict identifies uniqueness for a given DataSilo.
+
+        # exclude metrics and task type from checksum creation as they don't affect the dataset
+        task_dicts = copy.deepcopy(self.processor.tasks)
+        for task in task_dicts:
+            task_dicts[task]["metric"] = None
+            task_dicts[task]["task_type"] = None
+
         payload_dict = {
             "train_filename": str(Path(self.processor.train_filename).absolute()),
             "data_dir": str(self.processor.data_dir.absolute()),
             "max_seq_len": self.processor.max_seq_len,
             "dev_split": self.processor.dev_split,
-            "tasks": self.processor.tasks
+            "tasks": task_dicts
         }
         checksum = get_dict_checksum(payload_dict)
         return checksum
