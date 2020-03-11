@@ -37,8 +37,22 @@ def f1_macro(preds, labels):
     return {"f1_macro": f1_score(y_true=labels, y_pred=preds, average="macro")}
 
 
-def roc_auc(probs, labels):
-    return {"roc_auc": roc_auc_score(y_true=[int(i) for i in labels], y_score=probs)}
+def roc_auc(probs, labels, exclude_empty_cols=False):
+    labels = labels.astype(int)
+
+    if exclude_empty_cols:
+        dim_size = len(labels[0])
+        mask = np.ones((dim_size), dtype=bool)
+        for c in range(dim_size):
+            if max(labels[:, c]) == 0:
+                mask[c] = False
+        labels = labels[:, mask]
+        probs = np.array(probs)[:, mask]
+
+        filtered_cols = np.count_nonzero(mask == False)
+        logger.info(f"{filtered_cols} columns not considered for ROC AUC calculation!")
+
+    return roc_auc_score(y_true=labels, y_score=probs, average="weighted")
 
 
 def pearson_and_spearman(preds, labels):
@@ -51,7 +65,7 @@ def pearson_and_spearman(preds, labels):
     }
 
 
-def compute_metrics(metric, preds, probs, labels):
+def compute_metrics(metric, preds, probs, labels, multilabel=False):
     assert len(preds) == len(labels)
     if metric == "mcc":
         return {"mcc": matthews_corrcoef(labels, preds)}
@@ -73,12 +87,12 @@ def compute_metrics(metric, preds, probs, labels):
     elif metric == "r2":
         return {"r2": r2_score(preds, labels)}
     elif metric == "roc_auc":
-        return roc_auc(probs, labels)
+        return {"roc_auc": roc_auc(probs, labels, exclude_empty_cols=multilabel)}
     # elif metric == "masked_accuracy":
     #     return simple_accuracy(preds, labels, ignore=-1)
     elif metric in registered_metrics:
         metric_func = registered_metrics[metric]
-        return metric_func(preds, probs, labels)
+        return metric_func(preds, probs, labels, multilabel)
     else:
         raise KeyError(metric)
 

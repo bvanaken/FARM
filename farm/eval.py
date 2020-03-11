@@ -39,7 +39,7 @@ class Evaluator:
         self.device = device
         self.report = report
 
-    def eval(self, model, return_preds_and_labels=False):
+    def eval(self, model, multilabel=False, return_preds_and_labels=False):
         """
         Performs evaluation on a given model.
 
@@ -93,7 +93,6 @@ class Evaluator:
                 mlb = MultiLabelBinarizer(classes=head.label_list)
                 # TODO check why .fit() should be called on predictions, rather than on labels
                 preds_all[head_num] = mlb.fit_transform(preds_all[head_num])
-                probs_all[head_num] = mlb.fit_transform(probs_all[head_num])
                 label_all[head_num] = mlb.transform(label_all[head_num])
             if hasattr(head, 'aggregate_preds'):
                 preds_all[head_num], label_all[head_num] = head.aggregate_preds(preds=preds_all[head_num],
@@ -106,8 +105,7 @@ class Evaluator:
                       "task_name": head.task_name}
             result.update(
                 compute_metrics(metric=head.metric, preds=preds_all[head_num], probs=probs_all[head_num],
-                                labels=label_all[head_num]
-                                )
+                                labels=label_all[head_num], multilabel=multilabel)
             )
 
             # Select type of report depending on prediction head output type
