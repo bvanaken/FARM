@@ -17,6 +17,7 @@ from farm.modeling.optimization import get_scheduler
 
 try:
     from apex import amp
+
     AMP_AVAILABLE = True
 except ImportError:
     AMP_AVAILABLE = False
@@ -103,26 +104,27 @@ class Trainer:
     intervals during training as well as evaluation on the test set at the end of training."""
 
     def __init__(
-        self,
-        model,
-        optimizer,
-        data_silo,
-        epochs,
-        n_gpu,
-        device,
-        lr_schedule=None,
-        evaluate_every=100,
-        use_amp=None,
-        grad_acc_steps=1,
-        local_rank=-1,
-        early_stopping=None,
-        log_learning_rate=False,
-        checkpoint_on_sigterm=False,
-        checkpoint_every=None,
-        checkpoint_root_dir=None,
-        checkpoints_to_keep=3,
-        from_epoch=0,
-        from_step=0,
+            self,
+            model,
+            optimizer,
+            data_silo,
+            epochs,
+            n_gpu,
+            device,
+            lr_schedule=None,
+            evaluate_every=100,
+            use_amp=None,
+            grad_acc_steps=1,
+            local_rank=-1,
+            early_stopping=None,
+            log_learning_rate=False,
+            checkpoint_on_sigterm=False,
+            checkpoint_every=None,
+            checkpoint_root_dir=None,
+            checkpoints_to_keep=3,
+            from_epoch=0,
+            from_step=0,
+            multilabel=False
     ):
         """
         :param optimizer: An optimizer object that determines the learning strategy to be used during training
@@ -180,6 +182,7 @@ class Trainer:
         self.log_params()
         self.early_stopping = early_stopping
         self.log_learning_rate = log_learning_rate
+        self.multilabel = multilabel
 
         if use_amp and not AMP_AVAILABLE:
             raise ImportError(f'Got use_amp = {use_amp}, but cannot find apex. '
@@ -258,7 +261,8 @@ class Trainer:
                     dev_data_loader = self.data_silo.get_data_loader("dev")
                     if dev_data_loader is not None:
                         evaluator_dev = Evaluator(
-                            data_loader=dev_data_loader, tasks=self.data_silo.processor.tasks, device=self.device
+                            data_loader=dev_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
+                            multilabel=self.multilabel
                         )
                         evalnr += 1
                         result = evaluator_dev.eval(self.model)
@@ -273,7 +277,8 @@ class Trainer:
                                 self.data_silo.processor.save(self.early_stopping.save_dir)
                             if do_stopping:
                                 # log the stopping
-                                logger.info("STOPPING EARLY AT EPOCH {}, STEP {}, EVALUATION {}".format(epoch, step, evalnr))
+                                logger.info(
+                                    "STOPPING EARLY AT EPOCH {}, STEP {}, EVALUATION {}".format(epoch, step, evalnr))
                 if do_stopping:
                     break
                 self.global_step += 1
@@ -293,7 +298,8 @@ class Trainer:
         test_data_loader = self.data_silo.get_data_loader("test")
         if test_data_loader is not None:
             evaluator_test = Evaluator(
-                data_loader=test_data_loader, tasks=self.data_silo.processor.tasks, device=self.device
+                data_loader=test_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
+                multilabel=self.multilabel
             )
             result = evaluator_test.eval(self.model)
             evaluator_test.log_results(result, "Test", self.global_step)
@@ -495,4 +501,3 @@ class Trainer:
         }
 
         return state_dict
-

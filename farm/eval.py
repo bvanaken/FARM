@@ -21,7 +21,7 @@ class Evaluator:
     """Handles evaluation of a given model over a specified dataset."""
 
     def __init__(
-            self, data_loader, tasks, device, report=True
+            self, data_loader, tasks, device, report=True, multilabel=False
     ):
         """
         :param data_loader: The PyTorch DataLoader that will return batches of data from the evaluation dataset
@@ -38,8 +38,9 @@ class Evaluator:
         self.tasks = tasks
         self.device = device
         self.report = report
+        self.multilabel = multilabel
 
-    def eval(self, model, multilabel=False, return_preds_and_labels=False):
+    def eval(self, model, return_preds_and_labels=False):
         """
         Performs evaluation on a given model.
 
@@ -105,7 +106,7 @@ class Evaluator:
                       "task_name": head.task_name}
             result.update(
                 compute_metrics(metric=head.metric, preds=preds_all[head_num], probs=probs_all[head_num],
-                                labels=label_all[head_num], multilabel=multilabel)
+                                labels=label_all[head_num], multilabel=self.multilabel)
             )
 
             # Select type of report depending on prediction head output type
