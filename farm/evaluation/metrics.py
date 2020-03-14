@@ -38,7 +38,10 @@ def f1_macro(preds, labels):
 
 
 def roc_auc(probs, labels, exclude_empty_cols=False):
-    labels = labels.astype(int)
+    if isinstance(labels, list):
+        labels = np.array(labels, dtype=int)
+    else:
+        labels = labels.astype(int)
 
     if exclude_empty_cols:
         dim_size = len(labels[0])
