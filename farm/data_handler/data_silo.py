@@ -43,6 +43,7 @@ class DataSilo:
             max_processes=128,
             caching=False,
             cache_path=Path("cache/data_silo"),
+            cache_dir=None
     ):
         """
         :param processor: A dataset specific Processor object which will turn input (file or dict) into a Pytorch Dataset.
@@ -76,11 +77,15 @@ class DataSilo:
         self.max_multiprocessing_chunksize = max_multiprocessing_chunksize
         self.caching = caching
         self.cache_path = cache_path
+        self.cache_dir = cache_dir
 
         loaded_from_cache = False
         if self.caching:  # Check if DataSets are present in cache
-            checksum = self._get_checksum()
-            dataset_path = self.cache_path / checksum
+            if cache_dir:
+                dataset_path = self.cache_dir
+            else:
+                checksum = self._get_checksum()
+                dataset_path = self.cache_path / checksum
 
             if dataset_path.exists():
                 self._load_dataset_from_cache(dataset_path)
@@ -285,9 +290,11 @@ class DataSilo:
         """
         Serialize and save dataset to a cache.
         """
-        checksum = self._get_checksum()
-
-        cache_dir = self.cache_path / checksum
+        if self.cache_dir:
+            cache_dir = self.cache_dir
+        else:
+            checksum = self._get_checksum()
+            cache_dir = self.cache_path / checksum
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         torch.save(self.data["train"], cache_dir / "train_dataset")
