@@ -202,7 +202,7 @@ class AdaptiveModel(nn.Module):
         all_probs = []
         # collect preds from all heads
         for head, logits_for_head in zip(self.prediction_heads, logits):
-            probs = head.logits_to_probs(logits=logits_for_head, return_class_probs=False, **kwargs)
+            probs = head.logits_to_probs(logits=logits_for_head, **kwargs)
             all_probs.append(probs)
         return all_probs
 

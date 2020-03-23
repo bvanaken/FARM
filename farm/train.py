@@ -125,7 +125,8 @@ class Trainer:
             from_epoch=0,
             from_step=0,
             global_step=0,
-            multilabel=False):
+            multilabel=False,
+            multiclass=False):
         """
         :param optimizer: An optimizer object that determines the learning strategy to be used during training
         :param data_silo: A DataSilo object that will contain the train, dev and test datasets as PyTorch DataLoaders
@@ -185,6 +186,7 @@ class Trainer:
         self.early_stopping = early_stopping
         self.log_learning_rate = log_learning_rate
         self.multilabel = multilabel
+        self.multiclass = multiclass
 
         if use_amp and not AMP_AVAILABLE:
             raise ImportError(f'Got use_amp = {use_amp}, but cannot find apex. '
@@ -256,7 +258,7 @@ class Trainer:
                     if dev_data_loader is not None:
                         evaluator_dev = Evaluator(
                             data_loader=dev_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
-                            multilabel=self.multilabel
+                            multilabel=self.multilabel, multiclass=self.multiclass
                         )
                         evalnr += 1
                         result = evaluator_dev.eval(self.model)
@@ -303,7 +305,7 @@ class Trainer:
         if test_data_loader is not None:
             evaluator_test = Evaluator(
                 data_loader=test_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
-                multilabel=self.multilabel
+                multilabel=self.multilabel, multiclass=self.multiclass
             )
             result = evaluator_test.eval(self.model)
             evaluator_test.log_results(result, "Test", self.global_step)

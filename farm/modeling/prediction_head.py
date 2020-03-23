@@ -334,7 +334,7 @@ class TextClassificationHead(PredictionHead):
         label_ids = kwargs.get(self.label_tensor_name)
         return self.loss_fct(logits, label_ids.view(-1))
 
-    def logits_to_probs(self, logits, return_class_probs, **kwargs):
+    def logits_to_probs(self, logits, return_class_probs=False, **kwargs):
         softmax = torch.nn.Softmax(dim=1)
         probs = softmax(logits)
         if return_class_probs:
