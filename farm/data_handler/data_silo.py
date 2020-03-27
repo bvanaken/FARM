@@ -87,7 +87,9 @@ class DataSilo:
                 checksum = self._get_checksum()
                 dataset_path = self.cache_path / checksum
 
-            if dataset_path.exists():
+            train_set_path = dataset_path / "train_dataset"
+
+            if train_set_path.exists():
                 self._load_dataset_from_cache(dataset_path)
                 loaded_from_cache = True
 
