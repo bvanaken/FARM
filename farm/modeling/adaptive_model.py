@@ -6,7 +6,6 @@ from pathlib import Path
 
 import multiprocessing
 import numpy
-import onnxruntime
 import torch
 from torch import nn
 from transformers.modeling_auto import AutoModelForQuestionAnswering, AutoModelForSequenceClassification, AutoModelForTokenClassification, AutoModelWithLMHead
@@ -157,6 +156,12 @@ class BaseAdaptiveModel:
 
         return model_files, config_files
 
+def loss_per_head_sum(loss_per_head, global_step=None, batch=None):
+    """
+    Input: loss_per_head (list of tensors), global_step (int), batch (dict)
+    Output: aggregated loss (tensor)
+    """
+    return sum(loss_per_head)
 
 class AdaptiveModel(nn.Module, BaseAdaptiveModel):
     """ PyTorch implementation containing all the modelling needed for your NLP task. Combines a language
@@ -216,7 +221,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         self.log_params()
         # default loss aggregation function is a simple sum (without using any of the optional params)
         if not loss_aggregation_fn:
-            loss_aggregation_fn = lambda loss_per_head, global_step=None, batch=None: sum(loss_per_head)
+            loss_aggregation_fn = loss_per_head_sum
         self.loss_aggregation_fn = loss_aggregation_fn
 
     def fit_heads_to_lm(self):
@@ -241,7 +246,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
             # Need to save config and pipeline
 
     @classmethod
-    def load(cls, load_dir, device, strict=True, lm_name=None):
+    def load(cls, load_dir, device, strict=True, lm_name=None, processor=None):
         """
         Loads an AdaptiveModel from a directory. The directory must contain:
 
@@ -262,6 +267,8 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                        the PredictionHead (see torch.nn.module.load_state_dict()).
                        Set to `False` for backwards compatibility with PHs saved with older version of FARM.
         :type strict: bool
+        :param processor: populates prediction head with information coming from tasks
+        :type processor: Processor
         """
 
         # Language Model
@@ -279,10 +286,13 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
             prediction_heads.append(head)
             ph_output_type.append(head.ph_output_type)
 
-        return cls(language_model, prediction_heads, 0.1, ph_output_type, device)
+        model = cls(language_model, prediction_heads, 0.1, ph_output_type, device)
+        if processor:
+            model.connect_heads_with_processor(processor.tasks)
+
+        return model
 
     def logits_to_loss_per_head(self, logits, **kwargs):
-
         """
         Collect losses from each prediction head.
 
@@ -292,6 +302,11 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         """
         all_losses = []
         for head, logits_for_one_head in zip(self.prediction_heads, logits):
+            # check if PredictionHead connected to Processor
+            assert hasattr(head, "label_tensor_name"), \
+                (f"Label_tensor_names are missing inside the {head.task_name} Prediction Head. Did you connect the model"
+                " with the processor through either 'model.connect_heads_with_processor(processor.tasks)'"
+                " or by passing the processor to the Adaptive Model?")
             all_losses.append(head.logits_to_loss(logits=logits_for_one_head, **kwargs))
         return all_losses
 
@@ -563,7 +578,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         return transformers_model
 
     @classmethod
-    def convert_from_transformers(cls, model_name_or_path, device, task_type):
+    def convert_from_transformers(cls, model_name_or_path, device, task_type, processor=None):
         """
         Load a (downstream) model from huggingface's transformers format. Use cases:
          - continue training in FARM (e.g. take a squad QA model and fine-tune on your own data)
@@ -582,6 +597,8 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                           - 'text_classification'
                           - 'embeddings'
                           More tasks coming soon ...
+        :param processor: populates prediction head with information coming from tasks
+        :type processor: Processor
         :return: AdaptiveModel
         """
         lm = LanguageModel.load(model_name_or_path)
@@ -609,6 +626,9 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                                  lm_output_types=["per_token", "per_sequence"], device=device)
         else:
             raise NotImplementedError(f"Huggingface's transformer models of type {task_type} are not supported yet")
+
+        if processor:
+            adaptive_model.connect_heads_with_processor(processor.tasks)
 
         return adaptive_model
 
@@ -735,6 +755,7 @@ class ONNXAdaptiveModel(BaseAdaptiveModel):
 
     @classmethod
     def load(cls, load_dir, device, **kwargs):
+        import onnxruntime
         sess_options = onnxruntime.SessionOptions()
         # Set graph optimization level to ORT_ENABLE_EXTENDED to enable bert optimization.
         sess_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
