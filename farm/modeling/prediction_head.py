@@ -325,7 +325,8 @@ class TextClassificationHead(PredictionHead):
             head.feed_forward.feed_forward[0].load_state_dict(full_model.classifier.state_dict())
             del full_model
 
-        return head
+        cls.head = head
+        return cls.head
 
     def forward(self, X):
         logits = self.feed_forward(X)
