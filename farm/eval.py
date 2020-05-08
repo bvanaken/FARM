@@ -143,7 +143,7 @@ class Evaluator:
 
                 # log with ML framework (e.g. Mlflow)
                 if logging:
-                    if not metric_name in ["preds", "labels"] and not metric_name.startswith("_"):
+                    if not metric_name in ["preds", "probs", "labels"] and not metric_name.startswith("_"):
                         if isinstance(metric_val, numbers.Number):
                             MlLogger.log_metrics(
                                 metrics={
@@ -160,7 +160,7 @@ class Evaluator:
                         metric_log = "{}: \n {}".format(metric_name, metric_val)
                         logger.info(metric_log)
                     else:
-                        if not metric_name in ["preds", "labels"] and not metric_name.startswith("_"):
+                        if not metric_name in ["preds", "probs", "labels"] and not metric_name.startswith("_"):
                             metric_log = "{}: {}".format(metric_name, metric_val)
                             logger.info(metric_log)
 
