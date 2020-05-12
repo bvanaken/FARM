@@ -72,6 +72,8 @@ def roc_auc(probs, labels, exclude_empty_cols=False, multi_class='ovo'):
     else:
         labels = labels.astype(int)
 
+    y_score = probs
+
     if exclude_empty_cols:
         dim_size = len(labels[0])
         mask = np.ones((dim_size), dtype=bool)
@@ -79,12 +81,12 @@ def roc_auc(probs, labels, exclude_empty_cols=False, multi_class='ovo'):
             if max(labels[:, c]) == 0:
                 mask[c] = False
         labels = labels[:, mask]
-        probs = np.array(probs)[:, mask]
+        y_score = np.array(probs)[:, mask]
 
         filtered_cols = np.count_nonzero(mask == False)
         logger.info(f"{filtered_cols} columns not considered for ROC AUC calculation!")
 
-    return roc_auc_score(y_true=labels, y_score=probs, average="weighted", multi_class=multi_class)
+    return roc_auc_score(y_true=labels, y_score=y_score, average="weighted", multi_class=multi_class)
 
 
 def pearson_and_spearman(preds, labels):
