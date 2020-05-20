@@ -66,7 +66,7 @@ def f1_macro(preds, labels):
     return {"f1_macro": f1_score(y_true=labels, y_pred=preds, average="macro")}
 
 
-def roc_auc(probs, labels, exclude_empty_cols=False, multi_class='ovo'):
+def roc_auc(probs, labels, exclude_empty_cols=False, average='macro', multi_class='ovo'):
     if isinstance(labels, list):
         labels = np.array(labels, dtype=int)
     else:
@@ -86,7 +86,7 @@ def roc_auc(probs, labels, exclude_empty_cols=False, multi_class='ovo'):
         filtered_cols = np.count_nonzero(mask == False)
         logger.info(f"{filtered_cols} columns not considered for ROC AUC calculation!")
 
-    return roc_auc_score(y_true=labels, y_score=y_score, average="weighted", multi_class=multi_class)
+    return roc_auc_score(y_true=labels, y_score=y_score, average=average, multi_class=multi_class)
 
 
 def pearson_and_spearman(preds, labels):
