@@ -18,7 +18,7 @@ class Evaluator:
     """Handles evaluation of a given model over a specified dataset."""
 
     def __init__(
-            self, data_loader, tasks, device, report=True, multilabel=False, multiclass=False
+            self, data_loader, tasks, device, report=True, multiclass=False
     ):
         """
         :param data_loader: The PyTorch DataLoader that will return batches of data from the evaluation dataset
@@ -35,7 +35,6 @@ class Evaluator:
         self.tasks = tasks
         self.device = device
         self.report = report
-        self.multilabel = multilabel
         self.multiclass = multiclass
 
     def eval(self, model, return_preds_and_labels=False):
@@ -86,7 +85,8 @@ class Evaluator:
         # Evaluate per prediction head
         all_results = []
         for head_num, head in enumerate(model.prediction_heads):
-            if head.model_type == "multilabel_text_classification":
+            multilabel = head.model_type == "multilabel_text_classification"
+            if multilabel:
                 # converting from string preds back to multi-hot encoding
                 from sklearn.preprocessing import MultiLabelBinarizer
                 mlb = MultiLabelBinarizer(classes=head.label_list)
@@ -104,7 +104,7 @@ class Evaluator:
                       "task_name": head.task_name}
             result.update(
                 compute_metrics(metric=head.metric, preds=preds_all[head_num], probs=probs_all[head_num],
-                                labels=label_all[head_num], multilabel=self.multilabel)
+                                labels=label_all[head_num], multilabel=multilabel)
             )
 
             # Select type of report depending on prediction head output type

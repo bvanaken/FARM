@@ -127,7 +127,6 @@ class Trainer:
             from_step=0,
             global_step=0,
             evaluator_test=True,
-            multilabel=False,
             multiclass=False
     ):
         """
@@ -193,7 +192,6 @@ class Trainer:
         self.log_params()
         self.early_stopping = early_stopping
         self.log_learning_rate = log_learning_rate
-        self.multilabel = multilabel
         self.multiclass = multiclass
         self.evaluator_test = evaluator_test
 
@@ -267,7 +265,7 @@ class Trainer:
                     if dev_data_loader is not None:
                         evaluator_dev = Evaluator(
                             data_loader=dev_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
-                            report=self.eval_report, multilabel=self.multilabel, multiclass=self.multiclass
+                            report=self.eval_report, multiclass=self.multiclass
 
                         )
                         evalnr += 1
@@ -316,7 +314,7 @@ class Trainer:
             if test_data_loader is not None:
                 evaluator_test = Evaluator(
                     data_loader=test_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
-                    multilabel=self.multilabel, multiclass=self.multiclass
+                    multiclass=self.multiclass
                 )
                 result = evaluator_test.eval(self.model)
                 evaluator_test.log_results(result, "Test", self.global_step)
