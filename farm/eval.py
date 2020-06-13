@@ -18,7 +18,7 @@ class Evaluator:
     """Handles evaluation of a given model over a specified dataset."""
 
     def __init__(
-            self, data_loader, tasks, device, report=True, multiclass=False
+            self, data_loader, tasks, device, report=True
     ):
         """
         :param data_loader: The PyTorch DataLoader that will return batches of data from the evaluation dataset
@@ -35,7 +35,6 @@ class Evaluator:
         self.tasks = tasks
         self.device = device
         self.report = report
-        self.multiclass = multiclass
 
     def eval(self, model, return_preds_and_labels=False):
         """
@@ -69,7 +68,7 @@ class Evaluator:
                 logits = model.forward(**batch)
                 losses_per_head = model.logits_to_loss_per_head(logits=logits, **batch)
                 preds = model.logits_to_preds(logits=logits, **batch)
-                probs = model.logits_to_probs(logits=logits, return_class_probs=self.multiclass, **batch)
+                probs = model.logits_to_probs(logits=logits, **batch)
                 labels = model.prepare_labels(**batch)
 
             # stack results of all batches per prediction head

@@ -338,10 +338,11 @@ class TextClassificationHead(PredictionHead):
         label_ids = kwargs.get(self.label_tensor_name)
         return self.loss_fct(logits, label_ids.view(-1))
 
-    def logits_to_probs(self, logits, return_class_probs=False, **kwargs):
+    def logits_to_probs(self, logits, **kwargs):
         softmax = torch.nn.Softmax(dim=1)
         probs = softmax(logits)
-        if return_class_probs:
+        if self.num_labels > 2:
+            # Return probability for each class in multi-class scenario
             probs = probs.cpu().numpy()
         else:
             pred_ids = logits.argmax(1)

@@ -126,8 +126,7 @@ class Trainer:
             from_epoch=0,
             from_step=0,
             global_step=0,
-            evaluator_test=True,
-            multiclass=False
+            evaluator_test=True
     ):
         """
         :param optimizer: An optimizer object that determines the learning strategy to be used during training
@@ -192,7 +191,6 @@ class Trainer:
         self.log_params()
         self.early_stopping = early_stopping
         self.log_learning_rate = log_learning_rate
-        self.multiclass = multiclass
         self.evaluator_test = evaluator_test
 
         if use_amp and not AMP_AVAILABLE:
@@ -265,8 +263,7 @@ class Trainer:
                     if dev_data_loader is not None:
                         evaluator_dev = Evaluator(
                             data_loader=dev_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
-                            report=self.eval_report, multiclass=self.multiclass
-
+                            report=self.eval_report
                         )
                         evalnr += 1
                         result = evaluator_dev.eval(self.model)
@@ -313,8 +310,7 @@ class Trainer:
             test_data_loader = self.data_silo.get_data_loader("test")
             if test_data_loader is not None:
                 evaluator_test = Evaluator(
-                    data_loader=test_data_loader, tasks=self.data_silo.processor.tasks, device=self.device,
-                    multiclass=self.multiclass
+                    data_loader=test_data_loader, tasks=self.data_silo.processor.tasks, device=self.device
                 )
                 result = evaluator_test.eval(self.model)
                 evaluator_test.log_results(result, "Test", self.global_step)
