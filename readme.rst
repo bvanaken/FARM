@@ -66,7 +66,7 @@ Core features
 - Simple **deployment** and **visualization** to showcase your model
 
 +------------------------------+-------------------+-------------------+-------------------+-------------------+-------------------+-------------------+
-| Task                         |      BERT         |  RoBERTa          |  XLNet            |  ALBERT           |  DistilBERT       |  XLMRoBERTa       |
+| Task                         |      BERT         |  RoBERTa*         |  XLNet            |  ALBERT           |  DistilBERT       |  XLMRoBERTa       |
 +==============================+===================+===================+===================+===================+===================+===================+
 | Text classification          | x                 |  x                |  x                |  x                |  x                |  x                |
 +------------------------------+-------------------+-------------------+-------------------+-------------------+-------------------+-------------------+
@@ -88,6 +88,8 @@ Core features
 +------------------------------+-------------------+-------------------+-------------------+-------------------+-------------------+-------------------+
 | Passage Ranking              | x                 |  x                |  x                |  x                |  x                |  x                |
 +------------------------------+-------------------+-------------------+-------------------+-------------------+-------------------+-------------------+
+
+\* including CamemBERT and UmBERTo
 
 ****NEW**** Interested in doing Question Answering at scale? Checkout `Haystack <https://github.com/deepset-ai/haystack>`_!
 
@@ -250,6 +252,11 @@ Much of the heavy lifting is then handled behind the scenes to make it fast & si
 `(Learn more) <https://farm.deepset.ai/data_handling.html>`__
 
 .. image:: https://raw.githubusercontent.com/deepset-ai/FARM/master/docs/img/data_silo_no_bg_small.jpg
+
+Inference Time Benchmarks
+##########################
+
+FARM has a configurable `test suite <https://github.com/deepset-ai/FARM/blob/master/test/benchmarks/README.md>`__ for benchmarking inference times with combinations of inference engine(PyTorch, `ONNXRuntime <https://github.com/microsoft/onnxruntime>`__), batch size, document length, maximum sequence length, and other parameters. `Here <https://docs.google.com/spreadsheets/d/1ak9Cxj1zcNBDtjf7qn2j_ydKDDzpBgWiyJ7cO-7BPvA/edit?usp=sharing>`__ is a benchmark for Question Answering inference with the current FARM version.
 
 FAQ
 ####

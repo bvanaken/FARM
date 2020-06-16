@@ -41,12 +41,12 @@ from transformers.modeling_albert import AlbertModel, AlbertConfig
 from transformers.modeling_xlm_roberta import XLMRobertaModel, XLMRobertaConfig
 from transformers.modeling_distilbert import DistilBertModel, DistilBertConfig
 from transformers.modeling_electra import ElectraModel, ElectraConfig
+from transformers.modeling_camembert import CamembertModel, CamembertConfig
 from transformers.modeling_utils import SequenceSummary
 from transformers.tokenization_bert import load_vocab
 
 from farm.modeling import wordembedding_utils
 from farm.modeling.wordembedding_utils import s3e_pooling
-
 
 # These are the names of the attributes in various model configs which refer to the number of dimensions
 # in the output vectors
@@ -134,6 +134,8 @@ class LanguageModel(nn.Module):
                     language_model_class = 'XLMRoberta'
                 elif 'roberta' in pretrained_model_name_or_path:
                     language_model_class = 'Roberta'
+                elif 'camembert' in pretrained_model_name_or_path or 'umberto' in pretrained_model_name_or_path:
+                    language_model_class = "Camembert"
                 elif 'albert' in pretrained_model_name_or_path:
                     language_model_class = 'Albert'
                 elif 'distilbert' in pretrained_model_name_or_path:
@@ -151,10 +153,6 @@ class LanguageModel(nn.Module):
                 language_model = cls.subclasses[language_model_class].load(pretrained_model_name_or_path, **kwargs)
             else:
                 language_model = None
-
-            if language_model_class == 'XLMRoberta':
-                # TODO: for some reason, the pretrained XLMRoberta has different vocab size in the tokenizer compared to the model this is a hack to resolve that
-                n_added_tokens = 3
 
         if not language_model:
             raise Exception(
@@ -238,7 +236,17 @@ class LanguageModel(nn.Module):
             "multilingual",
         )
         matches = [lang for lang in known_languages if lang in name]
-        if len(matches) == 0:
+        if "camembert" in name:
+            language = "french"
+            logger.info(
+                f"Automatically detected language from language model name: {language}"
+            )
+        elif "umberto" in name:
+            language = "italian"
+            logger.info(
+                f"Automatically detected language from language model name: {language}"
+            )
+        elif len(matches) == 0:
             language = "english"
             logger.warning(
                 "Could not automatically detect from language model name what language it is. \n"
@@ -246,11 +254,13 @@ class LanguageModel(nn.Module):
                 "\t If not: Init the language model by supplying the 'language' param."
             )
         elif len(matches) > 1:
-            raise ValueError(
+            logger.warning(
                 "Could not automatically detect from language model name what language it is.\n"
                 f"\t Found multiple matches: {matches}\n"
                 "\t Please init the language model by manually supplying the 'language' as a parameter.\n"
+                f"\t Using {matches[0]} as language parameter for now.\n"
             )
+            language = matches[0]
         else:
             language = matches[0]
             logger.info(
@@ -883,7 +893,7 @@ class XLNet(LanguageModel):
         )
         # XLNet also only returns the sequence_output (one vec per token)
         # We need to manually aggregate that to get a pooled output (one vec per seq)
-        #TODO verify that this is really doing correct pooling
+        # TODO verify that this is really doing correct pooling
         pooled_output = self.pooler(output_tuple[0])
 
         if self.model.output_hidden_states == True:
@@ -1238,10 +1248,11 @@ class Electra(LanguageModel):
         # ELECTRA does not provide a pooled_output by default. Therefore, we need to initialize an extra pooler.
         # The pooler takes the first hidden representation & feeds it to a dense layer of (hidden_dim x hidden_dim).
         # We don't want a dropout in the end of the pooler, since we do that already in the adaptive model before we
-        # feed everything to the prediction head
+        # feed everything to the prediction head.
+        # Note: ELECTRA uses gelu as activation (BERT uses tanh instead)
         config.summary_last_dropout = 0
         config.summary_type = 'first'
-        config.summary_activation = 'tanh'
+        config.summary_activation = 'gelu'
         electra.pooler = SequenceSummary(config)
         electra.pooler.apply(electra.model._init_weights)
         return electra
@@ -1285,3 +1296,47 @@ class Electra(LanguageModel):
     def disable_hidden_states_output(self):
         self.model.config.output_hidden_states = False
 
+
+class Camembert(Roberta):
+    """
+    A Camembert model that wraps the HuggingFace's implementation
+    (https://github.com/huggingface/transformers) to fit the LanguageModel class.
+    """
+    def __init__(self):
+        super(Camembert, self).__init__()
+        self.model = None
+        self.name = "camembert"
+
+    @classmethod
+    def load(cls, pretrained_model_name_or_path, language=None, **kwargs):
+        """
+        Load a language model either by supplying
+
+        * the name of a remote model on s3 ("camembert-base" ...)
+        * or a local path of a model trained via transformers ("some_dir/huggingface_model")
+        * or a local path of a model trained via FARM ("some_dir/farm_model")
+
+        :param pretrained_model_name_or_path: name or path of a model
+        :param language: (Optional) Name of language the model was trained for (e.g. "german").
+                         If not supplied, FARM will try to infer it from the model name.
+        :return: Language Model
+
+        """
+        camembert = cls()
+        if "farm_lm_name" in kwargs:
+            camembert.name = kwargs["farm_lm_name"]
+        else:
+            camembert.name = pretrained_model_name_or_path
+        # We need to differentiate between loading model using FARM format and Pytorch-Transformers format
+        farm_lm_config = Path(pretrained_model_name_or_path) / "language_model_config.json"
+        if os.path.exists(farm_lm_config):
+            # FARM style
+            config = CamembertConfig.from_pretrained(farm_lm_config)
+            farm_lm_model = Path(pretrained_model_name_or_path) / "language_model.bin"
+            camembert.model = CamembertModel.from_pretrained(farm_lm_model, config=config, **kwargs)
+            camembert.language = camembert.model.config.language
+        else:
+            # Huggingface transformer Style
+            camembert.model = CamembertModel.from_pretrained(str(pretrained_model_name_or_path), **kwargs)
+            camembert.language = cls._get_or_infer_language_from_name(language, pretrained_model_name_or_path)
+        return camembert

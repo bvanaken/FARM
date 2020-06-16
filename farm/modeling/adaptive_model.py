@@ -2,20 +2,24 @@ import copy
 import json
 import logging
 import os
+from argparse import Namespace
 from pathlib import Path
 
 import multiprocessing
 import numpy
 import torch
 from torch import nn
-from transformers.modeling_auto import AutoModelForQuestionAnswering, AutoModelForSequenceClassification, AutoModelForTokenClassification, AutoModelWithLMHead
+from transformers.modeling_auto import AutoModelForQuestionAnswering, AutoModelForSequenceClassification, \
+    AutoModelForTokenClassification, AutoModelWithLMHead
 
+from farm.conversion.onnx_optimization.bert_model_optimization import main as optimize_onnx_model
 from farm.data_handler.data_silo import DataSilo
 from farm.data_handler.processor import SquadProcessor
 from farm.modeling.language_model import LanguageModel
-from farm.modeling.prediction_head import PredictionHead, QuestionAnsweringHead, TokenClassificationHead, TextClassificationHead
+from farm.modeling.prediction_head import PredictionHead, QuestionAnsweringHead, TokenClassificationHead, \
+    TextClassificationHead, pick_single_fn
 from farm.modeling.tokenization import Tokenizer
-from farm.utils import MLFlowLogger as MlLogger
+from farm.utils import MLFlowLogger as MlLogger, stack
 
 logger = logging.getLogger(__name__)
 
@@ -79,17 +83,54 @@ class BaseAdaptiveModel:
         :type kwargs: object
         :return: predictions in the right format
         """
-        all_preds = []
-        # collect preds from all heads
-        # TODO add switch between single vs multiple prediction heads
-        for head, logits_for_head in zip(
-            self.prediction_heads, logits
-        ):
-            preds = head.formatted_preds(
-                logits=logits_for_head, **kwargs
-            )
-            all_preds.append(preds)
-        return all_preds
+        n_heads = len(self.prediction_heads)
+
+        if n_heads == 0:
+            # just return LM output (e.g. useful for extracting embeddings at inference time)
+            preds_final = self.language_model.formatted_preds(logits=logits, **kwargs)
+
+        elif n_heads == 1:
+            preds_final = []
+            # TODO This is very specific to QA, make more general
+            try:
+                preds_p = kwargs["preds_p"]
+                temp = [y[0] for y in preds_p]
+                preds_p_flat = [item for sublist in temp for item in sublist]
+                kwargs["preds_p"] = preds_p_flat
+            except KeyError:
+                kwargs["preds_p"] = None
+            head = self.prediction_heads[0]
+            logits_for_head = logits[0]
+            preds = head.formatted_preds(logits=logits_for_head, **kwargs)
+            # TODO This is very messy - we need better definition of what the output should look like
+            if type(preds) == list:
+                preds_final += preds
+            elif type(preds) == dict and "predictions" in preds:
+                preds_final.append(preds)
+
+        # This case is triggered by Natural Questions
+        else:
+            preds_final = [list() for _ in range(n_heads)]
+            preds = kwargs["preds_p"]
+            preds_for_heads = stack(preds)
+            logits_for_heads = [None] * n_heads
+
+            samples = [s for b in kwargs["baskets"] for s in b.samples]
+            kwargs["samples"] = samples
+
+            del kwargs["preds_p"]
+
+            for i, (head, preds_p_for_head, logits_for_head) in enumerate(
+                    zip(self.prediction_heads, preds_for_heads, logits_for_heads)):
+                preds = head.formatted_preds(logits=logits_for_head, preds_p=preds_p_for_head, **kwargs)
+                preds_final[i].append(preds)
+
+            # Look for a merge() function amongst the heads and if a single one exists, apply it to preds_final
+            merge_fn = pick_single_fn(self.prediction_heads, "merge_formatted_preds")
+            if merge_fn:
+                preds_final = merge_fn(preds_final)
+
+        return preds_final
 
     def connect_heads_with_processor(self, tasks, require_labels=True):
         """
@@ -109,7 +150,7 @@ class BaseAdaptiveModel:
                     idx = i
             if idx is not None:
                 logger.info(
-                "Removing the NextSentenceHead since next_sent_pred is set to False in the BertStyleLMProcessor")
+                    "Removing the NextSentenceHead since next_sent_pred is set to False in the BertStyleLMProcessor")
                 del self.prediction_heads[i]
 
         for head in self.prediction_heads:
@@ -156,6 +197,7 @@ class BaseAdaptiveModel:
 
         return model_files, config_files
 
+
 def loss_per_head_sum(loss_per_head, global_step=None, batch=None):
     """
     Input: loss_per_head (list of tensors), global_step (int), batch (dict)
@@ -163,18 +205,19 @@ def loss_per_head_sum(loss_per_head, global_step=None, batch=None):
     """
     return sum(loss_per_head)
 
+
 class AdaptiveModel(nn.Module, BaseAdaptiveModel):
     """ PyTorch implementation containing all the modelling needed for your NLP task. Combines a language
     model and a prediction head. Allows for gradient flow back to the language model component."""
 
     def __init__(
-        self,
-        language_model,
-        prediction_heads,
-        embeds_dropout_prob,
-        lm_output_types,
-        device,
-        loss_aggregation_fn=None,
+            self,
+            language_model,
+            prediction_heads,
+            embeds_dropout_prob,
+            lm_output_types,
+            device,
+            loss_aggregation_fn=None,
     ):
         """
         :param language_model: Any model that turns token ids into vector representations
@@ -304,9 +347,10 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         for head, logits_for_one_head in zip(self.prediction_heads, logits):
             # check if PredictionHead connected to Processor
             assert hasattr(head, "label_tensor_name"), \
-                (f"Label_tensor_names are missing inside the {head.task_name} Prediction Head. Did you connect the model"
-                " with the processor through either 'model.connect_heads_with_processor(processor.tasks)'"
-                " or by passing the processor to the Adaptive Model?")
+                (
+                    f"Label_tensor_names are missing inside the {head.task_name} Prediction Head. Did you connect the model"
+                    " with the processor through either 'model.connect_heads_with_processor(processor.tasks)'"
+                    " or by passing the processor to the Adaptive Model?")
             all_losses.append(head.logits_to_loss(logits=logits_for_one_head, **kwargs))
         return all_losses
 
@@ -346,7 +390,6 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
             all_preds.append(preds)
         return all_preds
 
-
     def logits_to_probs(self, logits, **kwargs):
         """
         Get probabilities from all prediction heads.
@@ -364,7 +407,6 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
             all_probs.append(probs)
         return all_probs
 
-
     def prepare_labels(self, **kwargs):
         """
         Label conversion to original label space, per prediction head.
@@ -381,29 +423,6 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
             labels = head.prepare_labels(**kwargs)
             all_labels.append(labels)
         return all_labels
-
-    def formatted_preds(self, logits, **kwargs):
-        """
-        Format predictions for inference.
-
-        :param logits: model logits
-        :type logits: torch.tensor
-        :param kwargs: placeholder for passing generic parameters
-        :type kwargs: object
-        :return: predictions in the right format
-        """
-        all_preds = []
-
-        if len(self.prediction_heads) == 0:
-            # just return LM output (e.g. useful for extracting embeddings at inference time)
-            all_preds = self.language_model.formatted_preds(logits=logits, **kwargs)
-        else:
-            # collect preds from all heads (default)
-            # TODO add switch between single vs multiple prediction heads
-            for head, logits_for_head in zip(self.prediction_heads, logits):
-                preds = head.formatted_preds(logits=logits_for_head, **kwargs)
-                all_preds.append(preds)
-        return all_preds
 
     def forward(self, **kwargs):
         """
@@ -427,7 +446,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                 elif lm_out == "per_sequence" or lm_out == "per_sequence_continuous":
                     output = self.dropout(pooled_output)
                 elif (
-                    lm_out == "per_token_squad"
+                        lm_out == "per_token_squad"
                 ):  # we need a per_token_squad because of variable metric computation later on...
                     output = self.dropout(sequence_output)
                 else:
@@ -446,9 +465,11 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
     def forward_lm(self, **kwargs):
         """
         Forward pass for the language model
+
         :param kwargs:
         :return:
         """
+
         # Check if we have to extract from a special layer of the LM (default = last layer)
         try:
             extraction_layer = self.language_model.extraction_layer
@@ -463,7 +484,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
             self.language_model.enable_hidden_states_output()
             sequence_output, pooled_output, all_hidden_states = self.language_model(**kwargs)
             sequence_output = all_hidden_states[extraction_layer]
-            pooled_output = None #not available in earlier layers
+            pooled_output = None  # not available in earlier layers
             self.language_model.disable_hidden_states_output()
         return sequence_output, pooled_output
 
@@ -508,9 +529,10 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
             raise ValueError(f"Currently conversion only works for models with a SINGLE prediction head. "
                              f"Your model has {len(self.prediction_heads)}")
         elif len(self.prediction_heads[0].layer_dims) != 2:
-            raise ValueError(f"Currently conversion only works for PredictionHeads that are a single layer Feed Forward NN with dimensions [LM_output_dim, number_classes].\n"
-                             f"            Your PredictionHead has {str(self.prediction_heads[0].layer_dims)} dimensions.")
-        #TODO add more infos to config
+            raise ValueError(
+                f"Currently conversion only works for PredictionHeads that are a single layer Feed Forward NN with dimensions [LM_output_dim, number_classes].\n"
+                f"            Your PredictionHead has {str(self.prediction_heads[0].layer_dims)} dimensions.")
+        # TODO add more infos to config
 
         if self.prediction_heads[0].model_type == "span_classification":
             # init model
@@ -540,12 +562,15 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                 # The RobertaClassificationhead has components: input2dense, dropout, tanh, dense2output
                 # The tanh function cannot be mapped to current FARM style linear Feed Forward ClassificationHeads.
                 # So conversion for this type cannot work. We would need a compatible FARM RobertaClassificationHead
-                logger.error("Conversion for Text Classification with Roberta or XLMRoberta not possible at the moment.")
+                logger.error(
+                    "Conversion for Text Classification with Roberta or XLMRoberta not possible at the moment.")
                 raise NotImplementedError
 
             # add more info to config
-            self.language_model.model.config.id2label = {id: label for id, label in enumerate(self.prediction_heads[0].label_list)}
-            self.language_model.model.config.label2id = {label: id for id, label in enumerate(self.prediction_heads[0].label_list)}
+            self.language_model.model.config.id2label = {id: label for id, label in
+                                                         enumerate(self.prediction_heads[0].label_list)}
+            self.language_model.model.config.label2id = {label: id for id, label in
+                                                         enumerate(self.prediction_heads[0].label_list)}
             self.language_model.model.config.finetuning_task = "text_classification"
             self.language_model.model.config.language = self.language_model.language
             self.language_model.model.config.num_labels = self.prediction_heads[0].num_labels
@@ -558,8 +583,10 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                 self.prediction_heads[0].feed_forward.feed_forward[0].state_dict())
         elif self.prediction_heads[0].model_type == "token_classification":
             # add more info to config
-            self.language_model.model.config.id2label = {id: label for id, label in enumerate(self.prediction_heads[0].label_list)}
-            self.language_model.model.config.label2id = {label: id for id, label in enumerate(self.prediction_heads[0].label_list)}
+            self.language_model.model.config.id2label = {id: label for id, label in
+                                                         enumerate(self.prediction_heads[0].label_list)}
+            self.language_model.model.config.label2id = {label: id for id, label in
+                                                         enumerate(self.prediction_heads[0].label_list)}
             self.language_model.model.config.finetuning_task = "token_classification"
             self.language_model.model.config.language = self.language_model.language
             self.language_model.model.config.num_labels = self.prediction_heads[0].num_labels
@@ -602,17 +629,18 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         :return: AdaptiveModel
         """
         lm = LanguageModel.load(model_name_or_path)
-        #TODO Infer type of head automatically from config
+        # TODO Infer type of head automatically from config
 
         if task_type == "question_answering":
             ph = QuestionAnsweringHead.load(model_name_or_path)
             adaptive_model = cls(language_model=lm, prediction_heads=[ph], embeds_dropout_prob=0.1,
-                               lm_output_types="per_token", device=device)
+                                 lm_output_types="per_token", device=device)
         elif task_type == "text_classification":
             if "roberta" in model_name_or_path:
                 # The RobertaClassificationhead has components: input2dense, dropout, tanh, dense2output
                 # The tanh function cannot be mapped to current FARM style linear Feed Forward PredictionHeads.
-                logger.error("Conversion for Text Classification with Roberta or XLMRoberta not possible at the moment.")
+                logger.error(
+                    "Conversion for Text Classification with Roberta or XLMRoberta not possible at the moment.")
                 raise NotImplementedError
             ph = TextClassificationHead.load(model_name_or_path)
             adaptive_model = cls(language_model=lm, prediction_heads=[ph], embeds_dropout_prob=0.1,
@@ -620,7 +648,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         elif task_type == "ner":
             ph = TokenClassificationHead.load(model_name_or_path)
             adaptive_model = cls(language_model=lm, prediction_heads=[ph], embeds_dropout_prob=0.1,
-                               lm_output_types="per_token", device=device)
+                                 lm_output_types="per_token", device=device)
         elif task_type == "embeddings":
             adaptive_model = cls(language_model=lm, prediction_heads=[], embeds_dropout_prob=0.1,
                                  lm_output_types=["per_token", "per_sequence"], device=device)
@@ -632,7 +660,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
 
         return adaptive_model
 
-    def convert_to_onnx(self, output_path, opset_version=11):
+    def convert_to_onnx(self, output_path, opset_version=11, optimize_for=None):
         """
         Convert a PyTorch AdaptiveModel to ONNX.
 
@@ -642,6 +670,10 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         :type output_path: Path
         :param opset_version: ONNX opset version
         :type opset_version: int
+        :param optimize_for: optimize the exported model for a target device. Available options
+                             are "gpu_tensor_core" (GPUs with tensor core like V100 or T4),
+                             "gpu_without_tensor_core" (most other GPUs), and "cpu".
+        :type optimize_for: str
         :return:
         """
         if type(self.prediction_heads[0]) is not QuestionAnsweringHead:
@@ -718,6 +750,33 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                                             'segment_ids': symbolic_names,
                                             'logits': symbolic_names,
                                             })
+
+        if optimize_for:
+            optimize_args = Namespace(
+                disable_attention=False, disable_bias_gelu=False, disable_embed_layer_norm=False, opt_level=99,
+                disable_skip_layer_norm=False, disable_bias_skip_layer_norm=False, hidden_size=768, verbose=False,
+                input='onnx-export/model.onnx', model_type='bert', num_heads=12, output='onnx-export/model.onnx'
+            )
+
+            if optimize_for == "gpu_tensor_core":
+                optimize_args.float16 = True
+                optimize_args.input_int32 = True
+            elif optimize_for == "gpu_without_tensor_core":
+                optimize_args.float16 = False
+                optimize_args.input_int32 = True
+            elif optimize_for == "cpu":
+                logger.info("")
+                optimize_args.float16 = False
+                optimize_args.input_int32 = False
+            else:
+                raise NotImplementedError(f"ONNXRuntime model optimization is not available for {optimize_for}. Choose "
+                                          f"one of 'gpu_tensor_core'(V100 or T4), 'gpu_without_tensor_core' or 'cpu'.")
+
+            optimize_onnx_model(optimize_args)
+        else:
+            logger.info("Exporting unoptimized ONNX model. To enable optimization, supply "
+                        "'optimize_for' parameter with the target device.'")
+
         # PredictionHead contains functionalities like logits_to_preds() that would still be needed
         # for Inference with ONNX models. Only the config of the PredictionHead is stored.
         for i, ph in enumerate(self.prediction_heads):
@@ -744,6 +803,7 @@ class ONNXAdaptiveModel(BaseAdaptiveModel):
 
     For inference, this class is compatible with the FARM Inferencer.
     """
+
     def __init__(self, onnx_session, prediction_heads, language, device):
         if str(device) == "cuda" and onnxruntime.get_device() != "GPU":
             raise Exception(f"Device {device} not available for Inference. For CPU, run pip install onnxruntime and"
@@ -774,7 +834,7 @@ class ONNXAdaptiveModel(BaseAdaptiveModel):
             prediction_heads.append(head)
             ph_output_type.append(head.ph_output_type)
 
-        with open(load_dir/"model_config.json") as f:
+        with open(load_dir / "model_config.json") as f:
             model_config = json.load(f)
             language = model_config["language"]
 
@@ -820,6 +880,7 @@ class ONNXWrapper(AdaptiveModel):
     However, the AdaptiveModel's forward takes keyword arguments. This class circumvents the issue by converting
     positional arguments to keyword arguments.
     """
+
     @classmethod
     def load_from_adaptive_model(cls, adaptive_model):
         model = copy.deepcopy(adaptive_model)
