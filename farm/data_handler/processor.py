@@ -40,8 +40,10 @@ from farm.data_handler.utils import (
     get_sequence_pair,
     join_sentences
 )
+
 from farm.modeling.tokenization import Tokenizer, tokenize_with_metadata, truncate_sequences
 from farm.utils import MLFlowLogger as MlLogger
+from farm.utils import try_get
 
 
 logger = logging.getLogger(__name__)
@@ -283,7 +285,7 @@ class Processor(ABC):
             try:
                 basket.samples = self._dict_to_samples(dictionary=basket.raw, all_dicts=all_dicts)
                 for num, sample in enumerate(basket.samples):
-                     sample.id = f"{basket.id}-{num}"
+                     sample.id = f"{basket.id_internal}-{num}"
             except:
                 logger.error(f"Could not create sample(s) from this dict: \n {basket.raw}")
                 raise
@@ -308,7 +310,7 @@ class Processor(ABC):
         dataset, tensor_names = convert_features_to_dataset(features=features_flat)
         return dataset, tensor_names
 
-    def dataset_from_dicts(self, dicts, indices=None, rest_api_schema=False, return_baskets = False):
+    def dataset_from_dicts(self, dicts, indices=None, return_baskets = False):
         """
         Contains all the functionality to turn a list of dict objects into a PyTorch Dataset and a
         list of tensor names. This can be used for inference mode.
@@ -317,21 +319,15 @@ class Processor(ABC):
         :type dicts: list of dicts
         :return: a Pytorch dataset and a list of tensor names.
         """
-        if rest_api_schema:
-            id_prefix = "infer"
-        else:
-            id_prefix = "train"
         # We need to add the index (coming from multiprocessing chunks) to have a unique basket ID
-        if indices:
-            self.baskets = [
-                SampleBasket(raw=tr, id=f"{id_prefix}-{index}")
-                for (tr, index) in zip(dicts, indices)
-            ]
-        else:
-            self.baskets = [
-                SampleBasket(raw=tr, id=f"{id_prefix}-{i}")
-                for (i, tr) in enumerate(dicts)
-            ]
+
+        self.baskets = []
+        for id_internal, d in enumerate(dicts):
+            id_external = self._id_from_dict(d)
+            if indices:
+                id_internal = indices[id_internal]
+            self.baskets.append(SampleBasket(raw=d, id_external=id_external, id_internal=id_internal))
+
         self._init_samples_in_baskets()
         self._featurize_samples()
         if indices:
@@ -353,6 +349,7 @@ class Processor(ABC):
             random_sample = random.choice(random_basket.samples)
             logger.info(random_sample)
 
+
     def _log_params(self):
         params = {
             "processor": self.__class__.__name__,
@@ -363,6 +360,21 @@ class Processor(ABC):
             value = getattr(self, name)
             params.update({name: str(value)})
         MlLogger.log_params(params)
+
+    @staticmethod
+    def _id_from_dict(d):
+        candidates = []
+        candidates.append(d.get("example_id", None))
+        candidates.append(d.get("external_id", None))
+        candidates = [x for x in candidates if x]
+        if len(candidates) == 0:
+            return None
+        elif len(candidates) == 1:
+            return candidates[0]
+        else:
+            raise Exception
+
+
 
 
 #########################################
@@ -920,9 +932,9 @@ class BertStyleLMProcessor(Processor):
                     self.tokenizer,
                     max_num_tokens,
                 )
+
                 sequence_a = join_sentences(sequence_a)
                 sequence_b = join_sentences(sequence_b)
-
                 for seq_name in ["tokens", "offsets", "start_of_word"]:
                     sequence_a[seq_name], sequence_b[seq_name], _ = truncate_sequences(
                         seq_a=sequence_a[seq_name],
@@ -980,12 +992,71 @@ class BertStyleLMProcessor(Processor):
         )
         return features
 
+    def estimate_n_samples(self, filepath, max_docs=500):
+        """
+        Estimates the number of samples from a given file BEFORE preprocessing.
+        Used in StreamingDataSilo to estimate the number of steps before actually processing the data.
+        The estimated number of steps will impact some types of Learning Rate Schedules.
+        :param filepath: str or Path, file with data used to create samples (e.g. train.txt)
+        :param max_docs: int, maximum number of docs to read in & use for our estimate of n_samples
+        :return: int, number of samples in the given dataset
+        """
+
+        total_lines = sum(1 for line in open(filepath, encoding="utf-8"))
+        empty_lines = sum(1 if line == "\n" else 0 for line in open(filepath, encoding="utf-8"))
+
+        if self.next_sent_pred_style == "sentence":
+            # one sample = two lines (except last line in doc)
+            n_samples = total_lines - (2 * empty_lines)
+        elif self.next_sent_pred_style == "bert-style":
+            # Original BERT LM training (filling up sequence pairs with sentences until max_seq_len)
+            # (This is a very rough heuristic, as we can only estimate the real number of samples AFTER tokenization)
+            logging.info(f"Estimating total number of samples ...")
+            # read in subset of docs
+            if self.max_docs:
+                temp = self.max_docs
+                self.max_docs = min(max_docs, temp)
+                dicts = list(self.file_to_dicts(filepath))
+                self.max_docs = temp
+            else:
+                self.max_docs = max_docs
+                dicts = list(self.file_to_dicts(filepath))
+                self.max_docs = None
+            # count samples
+            n_samples = 0
+            for d in dicts:
+                n_samples += len(self._dict_to_samples_bert_style(doc=d["doc"], all_dicts=dicts))
+            n_samples = int(n_samples / len(dicts)) * (empty_lines+1)
+            logging.info(f"Heuristic estimate of number of samples in {filepath} based on {len(dicts)} docs: {n_samples}")
+        else:
+            raise NotImplementedError(f"No estimate logic for next_sent_pred_style={self.next_sent_pred_style} implemented")
+        return n_samples
+
 
 #########################################
 # QA Processors ####
 #########################################
 
-class SquadProcessor(Processor):
+class QAProcessor(Processor):
+    """
+    This is class inherits from Processor and is the parent to SquadProcessor and NaturalQuestionsProcessor.
+    Its main role is to extend the __init__() so that the number of starting, intermediate and end special tokens
+    are calculated from the tokenizer and store as attributes. These are used by the child processors in their
+    sample_to_features() methods
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.initialize_special_tokens_count()
+
+    def initialize_special_tokens_count(self):
+        vec = self.tokenizer.build_inputs_with_special_tokens(token_ids_0=["a"],
+                                                              token_ids_1=["b"])
+        self.sp_toks_start = vec.index("a")
+        self.sp_toks_mid = vec.index("b") - self.sp_toks_start - 1
+        self.sp_toks_end = len(vec) - vec.index("b") - 1
+
+
+class SquadProcessor(QAProcessor):
     """ Used to handle the SQuAD dataset"""
 
     def __init__(
@@ -1016,7 +1087,7 @@ class SquadProcessor(Processor):
         :type data_dir: str
         :param label_list: list of labels to predict (strings). For most cases this should be: ["start_token", "end_token"]
         :type label_list: list
-        :param metric: name of metric that shall be used for evaluation, can be "squad" or "squad_top_recall"
+        :param metric: name of metric that shall be used for evaluation, can be "squad" or "top_n_accuracy"
         :type metric: str
         :param train_filename: The name of the file containing training data.
         :type train_filename: str
@@ -1081,74 +1152,18 @@ class SquadProcessor(Processor):
 
     def _dicts_to_baskets(self, dicts, indices):
         # Perform tokenization on documents and questions resulting in an unnested list of doc-question pairs
-        dicts_tokenized = [self.apply_tokenization(d) for d in dicts]
+        dicts_tokenized = [apply_tokenization(d, self.tokenizer) for d in dicts]
 
         baskets = []
+
         for index, document in zip(indices, dicts_tokenized):
             for q_idx, raw in enumerate(document):
                 # In case of Question Answering the external ID is used for document IDs
-                basket = SampleBasket(raw=raw, id=f"{index}-{q_idx}", external_id=raw.get("document_id",None))
+                id_external = self._id_from_dict(raw)
+                id_internal = f"{index}-{q_idx}"
+                basket = SampleBasket(raw=raw, id_internal=id_internal, id_external=id_external)
                 baskets.append(basket)
         return baskets
-
-
-    def apply_tokenization(self, dictionary):
-        """ This performs tokenization on all documents and questions. The result is a list (unnested)
-        where each entry is a dictionary for one document-question pair (potentially mutliple answers). """
-
-        raw_baskets = []
-        dictionary = convert_qa_input_dict(dictionary)
-        document_text = dictionary["context"]
-        document_id = dictionary.get("document_id",None)
-
-        document_tokenized = tokenize_with_metadata(document_text, self.tokenizer)
-        document_start_of_word = [int(x) for x in document_tokenized["start_of_word"]]
-        questions = dictionary["qas"]
-        for question in questions:
-            answers = []
-            # For training and dev where labelled samples are read in from a SQuAD style file
-            try:
-                squad_id = question["id"]
-                question_text = question["question"]
-                for answer in question["answers"]:
-                    if answer["text"] == "":
-                        answer_type = "is_impossible"
-                    else:
-                        answer_type = "span"
-                    a = {"text": answer["text"],
-                         "offset": answer["answer_start"],
-                         "answer_type": answer_type}
-                    answers.append(a)
-            # For inference where samples are read in as dicts without an id or answers
-            except TypeError:
-                squad_id = None
-                question_text = question
-            question_tokenized = tokenize_with_metadata(question_text, self.tokenizer)
-            question_start_of_word = [int(x) for x in question_tokenized["start_of_word"]]
-
-            # TODO for Squad and NQ, answer_type should be paired with the question and not the passage
-            # TODO make this change for both processors
-            if "is_impossible" not in question:
-                answer_type = "span"
-            else:
-                if question["is_impossible"]:
-                    answer_type = "is_impossible"
-                else:
-                    answer_type = "span"
-            raw = {"document_text": document_text,
-                   "document_tokens": document_tokenized["tokens"],
-                   "document_offsets": document_tokenized["offsets"],
-                   "document_start_of_word": document_start_of_word,
-                   "document_id": document_id,
-                   "question_text": question_text,
-                   "question_tokens": question_tokenized["tokens"],
-                   "question_offsets": question_tokenized["offsets"],
-                   "question_start_of_word": question_start_of_word,
-                   "answers": answers,
-                   "answer_type": answer_type,
-                   "squad_id": squad_id}
-            raw_baskets.append(raw)
-        return raw_baskets
 
     def file_to_dicts(self, file: str) -> [dict]:
         nested_dicts = read_squad_file(filename=file)
@@ -1165,13 +1180,15 @@ class SquadProcessor(Processor):
         return samples
 
     def _sample_to_features(self, sample) -> dict:
-        # TODO, make this function return one set of features per sample
+        check_valid_answer(sample)
         features = sample_to_features_qa(sample=sample,
                                          tokenizer=self.tokenizer,
-                                         max_seq_len=self.max_seq_len)
+                                         max_seq_len=self.max_seq_len,
+                                         sp_toks_start=self.sp_toks_start,
+                                         sp_toks_mid=self.sp_toks_mid)
         return features
 
-class NaturalQuestionsProcessor(Processor):
+class NaturalQuestionsProcessor(QAProcessor):
     """ Used to handle the Natural Question QA dataset"""
 
     def __init__(
@@ -1186,14 +1203,14 @@ class NaturalQuestionsProcessor(Processor):
         doc_stride=128,
         max_query_length=64,
         proxies=None,
-        keep_is_impossible=0.02,
+        keep_no_answer=0.02,
         downsample_context_size=None,
         inference=False,
         **kwargs):
         """
         Deals with all the preprocessing steps needed for Natural Questions. Follows Alberti 2019 et al. (https://arxiv.org/abs/1901.08634)
         in merging multiple disjoint short answers into the one longer label span and also by downsampling
-        samples of is_impossible during training
+        samples of no_answer during training
 
         :param tokenizer: Used to split a sentence (str) into tokens.
         :param max_seq_len: Samples are truncated after this many tokens.
@@ -1217,14 +1234,14 @@ class NaturalQuestionsProcessor(Processor):
         :type doc_stride: int
         :param max_query_length: Maximum length of the question (in number of subword tokens)
         :type max_query_length: int
-        :param keep_is_impossible: The probability that a sample with an is_impossible label is kept
-                                    (0.0 < keep_is_impossible <= 1.0). Only works if inference is False
-        :type keep_is_impossible: float
+        :param keep_no_answer: The probability that a sample with an no_answer label is kept
+                                    (0.0 < keep_no_answer <= 1.0). Only works if inference is False
+        :type keep_no_answer: float
         :param downsample_context_size: Downsampling before any data conversion by taking a short text window of size
                                         downsample_context_size around the long answer span. To disable set to None
         :type downsample_context_size: int
         :param inference: Whether we are currently using the Processsor for model inference. If True, the
-                          keep_is_impossible will be overridden and set to 1
+                          keep_no_answer will be overridden and set to 1
         :type inference: bool
         :param kwargs: placeholder for passing generic parameters
         :type kwargs: object
@@ -1234,11 +1251,11 @@ class NaturalQuestionsProcessor(Processor):
 
         # These are classification labels from Natural Questions. Note that in this implementation, we are merging
         # the "long_answer" and "short_answer" labels into the one "span" label
-        self.answer_type_list = ["is_impossible", "span", "yes", "no"]
+        self.answer_type_list = ["no_answer", "span", "yes", "no"]
 
         self.doc_stride = doc_stride
         self.max_query_length = max_query_length
-        self.keep_is_impossible = keep_is_impossible
+        self.keep_no_answer = keep_no_answer
         self.downsample_context_size = downsample_context_size
         self.inference = inference
 
@@ -1258,7 +1275,6 @@ class NaturalQuestionsProcessor(Processor):
         self.add_task("question_answering", "squad", ["start_token", "end_token"])
         self.add_task("text_classification", "f1_macro", self.answer_type_list, label_name="answer_type")
 
-
     def file_to_dicts(self, file: str) -> [dict]:
         dicts = read_jsonl(file, proxies=self.proxies)
         return dicts
@@ -1276,28 +1292,28 @@ class NaturalQuestionsProcessor(Processor):
         """
         # Turns a NQ dictionaries into a SQuAD style dictionaries
         if not self.inference:
-            dictionary = self.prepare_dict(dictionary=dictionary)
+            dictionary = self._prepare_dict(dictionary=dictionary)
 
-        dictionary_tokenized = self.apply_tokenization(dictionary)[0]
+        dictionary_tokenized = apply_tokenization(dictionary, self.tokenizer)[0]
         n_special_tokens = self.tokenizer.num_special_tokens_to_add(pair=True)
         samples = create_samples_qa(dictionary_tokenized,
                                     self.max_query_length,
                                     self.max_seq_len,
                                     self.doc_stride,
                                     n_special_tokens)
-        # Downsample the number of samples with an is_impossible label. This fn will always return at least one sample
+        # Downsample the number of samples with an no_answer label. This fn will always return at least one sample
         # so that we don't end up with a basket with 0 samples
         if not self.inference:
-            samples = self.downsample(samples, self.keep_is_impossible)
+            samples = self._downsample(samples, self.keep_no_answer)
         return samples
 
-    def downsample(self, samples, keep_prob):
-        # Downsamples samples with a is_impossible label (since there is an overrepresentation of these in NQ)
+    def _downsample(self, samples, keep_prob):
+        # Downsamples samples with a no_answer label (since there is an overrepresentation of these in NQ)
         # This method will always return at least one sample. This is done so that we don't end up with SampleBaskets
         # with 0 samples
         ret = []
         for s in samples:
-            if self.check_is_impossible(s):
+            if self._check_no_answer_sample(s):
                 if random_float() > 1 - keep_prob:
                     ret.append(s)
             else:
@@ -1306,22 +1322,7 @@ class NaturalQuestionsProcessor(Processor):
             ret = [random.choice(samples)]
         return ret
 
-    @staticmethod
-    def check_is_impossible(sample):
-        sample_tok = sample.tokenized
-        if len(sample_tok["answers"]) == 0:
-            return True
-        first_answer = sample_tok["answers"][0]
-        if first_answer["start_t"] < sample_tok["passage_start_t"]:
-            return True
-        if first_answer["end_t"] > sample_tok["passage_start_t"] + len(sample_tok["passage_tokens"]):
-            return True
-        if first_answer["answer_type"] == "is_impossible":
-            return True
-        else:
-            return False
-
-    def downsample_unprocessed(self, dictionary):
+    def _downsample_unprocessed(self, dictionary):
         doc_text = dictionary["document_text"]
         doc_tokens = doc_text.split(" ")
         annotations = dictionary.get("annotations",[])
@@ -1329,7 +1330,7 @@ class NaturalQuestionsProcessor(Processor):
         if len(annotations) == 1:
             annotation = annotations[0]
             # There seem to be cases where there is no answer but an annotation is given as a (-1, -1) long answer
-            if self.check_no_answer(annotation):
+            if self._check_no_answer(annotation):
                 dictionary["document_text"] = " ".join(doc_tokens[:self.max_seq_len+randint(1,self.downsample_context_size)])
             else:
                 # finding earliest start and latest end labels
@@ -1362,32 +1363,32 @@ class NaturalQuestionsProcessor(Processor):
         return dictionary
 
 
-    def prepare_dict(self, dictionary):
+    def _prepare_dict(self, dictionary):
         """ Casts a Natural Questions dictionary that is loaded from a jsonl file into SQuAD format so that
         the same featurization functions can be called for both tasks. Each annotation can be one of four answer types,
-        ["yes", "no", "span", "is_impossible"]"""
+        ["yes", "no", "span", "no_answer"]"""
 
         if self.downsample_context_size is not None:
-            dictionary = self.downsample_unprocessed(dictionary)
+            dictionary = self._downsample_unprocessed(dictionary)
 
         converted_answers = []
         doc_text = dictionary["document_text"]
         _, tok_to_ch = split_with_metadata(doc_text)
         for annotation in dictionary["annotations"]:
             # There seem to be cases where there is no answer but an annotation is given as a (-1, -1) long answer
-            if self.check_no_answer(annotation):
+            if self._check_no_answer(annotation):
                 continue
-            sa_text, sa_start_c = self.unify_short_answers(annotation["short_answers"], doc_text, tok_to_ch)
-            la_text, la_start_c = self.retrieve_long_answer(annotation["long_answer"]["start_token"],
-                                                            annotation["long_answer"]["end_token"],
-                                                            tok_to_ch,
-                                                            doc_text)
-            # Picks the span to be considered as annotation by choosing between short answer, long answer and is_impossible
-            text, start_c = self.choose_span(sa_text, sa_start_c, la_text, la_start_c)
+            sa_text, sa_start_c = self._unify_short_answers(annotation["short_answers"], doc_text, tok_to_ch)
+            la_text, la_start_c = self._retrieve_long_answer(annotation["long_answer"]["start_token"],
+                                                             annotation["long_answer"]["end_token"],
+                                                             tok_to_ch,
+                                                             doc_text)
+            # Picks the span to be considered as annotation by choosing between short answer, long answer and no_answer
+            text, start_c = self._choose_span(sa_text, sa_start_c, la_text, la_start_c)
             converted_answers.append({"text": text,
                                       "answer_start": start_c})
         if len(converted_answers) == 0:
-            answer_type = "is_impossible"
+            answer_type = "no_answer"
         else:
             answer_type = dictionary["annotations"][0]["yes_no_answer"].lower()
             if answer_type == "none":
@@ -1401,7 +1402,7 @@ class NaturalQuestionsProcessor(Processor):
         return converted
 
     @staticmethod
-    def check_no_answer(annotation):
+    def _check_no_answer(annotation):
         if annotation["long_answer"]["start_token"] > -1 or annotation["long_answer"]["end_token"] > -1:
             return False
         for sa in annotation["short_answers"]:
@@ -1410,14 +1411,29 @@ class NaturalQuestionsProcessor(Processor):
         else:
             return True
 
-    def retrieve_long_answer(self, start_t, end_t, tok_to_ch, doc_text):
+    @staticmethod
+    def _check_no_answer_sample(sample):
+        sample_tok = sample.tokenized
+        if len(sample_tok["answers"]) == 0:
+            return True
+        first_answer = sample_tok["answers"][0]
+        if first_answer["start_t"] < sample_tok["passage_start_t"]:
+            return True
+        if first_answer["end_t"] > sample_tok["passage_start_t"] + len(sample_tok["passage_tokens"]):
+            return True
+        if first_answer["answer_type"] == "no_answer":
+            return True
+        else:
+            return False
+
+    def _retrieve_long_answer(self, start_t, end_t, tok_to_ch, doc_text):
         """ Retrieves the string long answer and also its starting character index"""
-        start_c, end_c = self.convert_tok_to_ch(start_t, end_t, tok_to_ch, doc_text)
+        start_c, end_c = self._convert_tok_to_ch(start_t, end_t, tok_to_ch, doc_text)
         text = doc_text[start_c: end_c]
         return text, start_c
 
     @staticmethod
-    def choose_span(sa_text, sa_start_c, la_text, la_start_c):
+    def _choose_span(sa_text, sa_start_c, la_text, la_start_c):
         if sa_text:
             return sa_text, sa_start_c
         elif la_text:
@@ -1425,7 +1441,7 @@ class NaturalQuestionsProcessor(Processor):
         else:
             return "", -1
 
-    def unify_short_answers(self, short_answers, doc_text, tok_to_ch):
+    def _unify_short_answers(self, short_answers, doc_text, tok_to_ch):
         """ In cases where an NQ sample has multiple disjoint short answers, this fn generates the single shortest
         span that contains all the answers"""
         if not short_answers:
@@ -1437,13 +1453,13 @@ class NaturalQuestionsProcessor(Processor):
             short_answer_idxs.append(short_answer["end_token"])
         answer_start_t = min(short_answer_idxs)
         answer_end_t = max(short_answer_idxs)
-        answer_start_c, answer_end_c = self.convert_tok_to_ch(answer_start_t, answer_end_t, tok_to_ch, doc_text)
+        answer_start_c, answer_end_c = self._convert_tok_to_ch(answer_start_t, answer_end_t, tok_to_ch, doc_text)
         answer_text = doc_text[answer_start_c: answer_end_c]
         assert answer_text == " ".join(doc_text.split()[answer_start_t: answer_end_t])
         return answer_text, answer_start_c
 
     @staticmethod
-    def convert_tok_to_ch(start_t, end_t, tok_to_ch, doc_text):
+    def _convert_tok_to_ch(start_t, end_t, tok_to_ch, doc_text):
         n_tokens = len(tok_to_ch)
         if start_t == -1 and end_t == -1:
             return -1, -1
@@ -1457,67 +1473,13 @@ class NaturalQuestionsProcessor(Processor):
             end_c = len(span)
         return start_c, end_c
 
-    def apply_tokenization(self, dictionary):
-        """ This performs tokenization on all documents and questions. The result is a list
-        where each entry is a dictionary for one document-question pair (potentially mutliple answers). This is based on
-        the apply_tokenization method of SquadProcessor but slightly modified.
-
-        TODO: See if this can be merged with SquadProcessor.apply_tokenization()"""
-
-        raw_baskets = []
-        # Input dictionaries can have ["context", "qas"] (SQuAD format) as keys or
-        # ["text", "questions"] (FARM format). Both are supported
-        dictionary = convert_qa_input_dict(dictionary)
-        document_text = dictionary["context"]
-        document_id = dictionary.get("document_id", None)
-
-        document_tokenized = tokenize_with_metadata(document_text, self.tokenizer)
-        document_start_of_word = [int(x) for x in document_tokenized["start_of_word"]]
-        questions = dictionary["qas"]
-        for question in questions:
-            answers = []
-            # For training and dev with labelled examples
-            try:
-                nq_id = question["id"]
-                question_text = question["question"]
-                for answer in question["answers"]:
-                    a = {"text": answer["text"],
-                         "offset": answer["answer_start"],
-                         "answer_type": question["answer_type"]}
-                    answers.append(a)
-            # For inference where samples are read in without an id or answers
-            except TypeError:
-                nq_id = None
-                question_text = question
-            question_tokenized = tokenize_with_metadata(question_text, self.tokenizer)
-            question_start_of_word = [int(x) for x in question_tokenized["start_of_word"]]
-
-            # TODO compare data format with Squad to explain what this section is doing exactly
-            # TODO suspect that this might not be right for NQ
-            if "is_impossible" not in question:
-                answer_type = "span"
-            else:
-                answer_type = question["is_impossible"]
-
-            raw = {"document_text": document_text,
-                   "document_tokens": document_tokenized["tokens"],
-                   "document_offsets": document_tokenized["offsets"],
-                   "document_start_of_word": document_start_of_word,
-                   "document_id": document_id,
-                   "question_text": question_text,
-                   "question_tokens": question_tokenized["tokens"],
-                   "question_offsets": question_tokenized["offsets"],
-                   "question_start_of_word": question_start_of_word,
-                   "answers": answers,
-                   "answer_type": answer_type,
-                   "nq_id": nq_id}
-            raw_baskets.append(raw)
-        return raw_baskets
-
     def _sample_to_features(self, sample: Sample) -> dict:
+        check_valid_answer(sample)
         features = sample_to_features_qa(sample=sample,
                                          tokenizer=self.tokenizer,
                                          max_seq_len=self.max_seq_len,
+                                         sp_toks_start=self.sp_toks_start,
+                                         sp_toks_mid=self.sp_toks_mid,
                                          answer_type_list=self.answer_type_list)
         return features
 
@@ -1671,3 +1633,88 @@ class RegressionProcessor(Processor):
             tokenizer=self.tokenizer
         )
         return features
+
+
+def apply_tokenization(dictionary, tokenizer):
+    raw_baskets = []
+    dictionary = convert_qa_input_dict(dictionary)
+    dictionary["qas"] = is_impossible_to_answer_type(dictionary["qas"])
+    document_text = dictionary["context"]
+
+    document_tokenized = tokenize_with_metadata(document_text, tokenizer)
+    document_start_of_word = [int(x) for x in document_tokenized["start_of_word"]]
+    questions = dictionary["qas"]
+    for question in questions:
+        answers = []
+        # For training and dev with labelled examples
+        try:
+            external_id = question["id"]
+            question_text = question["question"]
+            for answer in question["answers"]:
+                if answer["text"] == "":
+                    answer_type = "no_answer"
+                else:
+                    answer_type = "span"
+                a = {"text": answer["text"],
+                     "offset": answer["answer_start"],
+                     "answer_type": answer_type}
+                answers.append(a)
+        # For inference where samples are read in as dicts without an id or answers
+        except TypeError:
+            external_id = try_get(["example_id", "external_id"], dictionary)
+            question_text = question
+
+        question_tokenized = tokenize_with_metadata(question_text, tokenizer)
+        question_start_of_word = [int(x) for x in question_tokenized["start_of_word"]]
+
+        # During inference, there is no_answer type. Also, question might be a str instead of a dict
+        if type(question) == str:
+            answer_type = None
+        elif type(question) == dict:
+            answer_type = question.get("answer_type", None)
+        else:
+            raise Exception("Question was neither in str nor dict format")
+
+        raw = {"document_text": document_text,
+               "document_tokens": document_tokenized["tokens"],
+               "document_offsets": document_tokenized["offsets"],
+               "document_start_of_word": document_start_of_word,
+               "question_text": question_text,
+               "question_tokens": question_tokenized["tokens"],
+               "question_offsets": question_tokenized["offsets"],
+               "question_start_of_word": question_start_of_word,
+               "answers": answers,
+               "answer_type": answer_type,
+               "external_id": external_id}
+        raw_baskets.append(raw)
+    return raw_baskets
+
+
+def is_impossible_to_answer_type(qas):
+    """ Converts questions from having an is_impossible field to having an answer_type field"""
+    new_qas = []
+    for q in qas:
+        answer_type = "span"
+        if "is_impossible" in q:
+            if q["is_impossible"] == True:
+                answer_type = "no_answer"
+            del q["is_impossible"]
+            q["answer_type"] = answer_type
+        new_qas.append(q)
+    return new_qas
+
+  
+def check_valid_answer(sample):
+    passage_text = sample.clear_text["passage_text"]
+    for answer in sample.clear_text["answers"]:
+        len_passage = len(passage_text)
+        start = answer["start_c"]
+        end = answer["end_c"]
+        # Cases where the answer is not within the current passage will be turned into no answers by the featurization fn
+        if start < 0 or end >= len_passage:
+            continue
+        answer_indices = passage_text[start: end + 1]
+        answer_text = answer["text"]
+        if answer_indices != answer_text:
+            raise ValueError(f"""Answer using start/end indices is '{answer_indices}' while gold label text is '{answer_text}'""")
+

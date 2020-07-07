@@ -1,23 +1,19 @@
-import itertools
 import json
 import logging
 import os
 import numpy as np
-import pandas as pd
-from scipy.special import expit, softmax
-import tqdm
-from pathlib import Path
-import torch
-from transformers.modeling_bert import BertForPreTraining, BertLayerNorm, ACT2FN
-from transformers.modeling_auto import AutoModelForQuestionAnswering, AutoModelForTokenClassification, \
-    AutoModelForSequenceClassification
-from transformers.configuration_auto import AutoConfig
 
+from pathlib import Path
+from transformers.modeling_bert import BertForPreTraining, BertLayerNorm, ACT2FN
+from transformers.modeling_auto import AutoModelForQuestionAnswering, AutoModelForTokenClassification, AutoModelForSequenceClassification
+from typing import List
+
+import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss
 
 from farm.data_handler.utils import is_json
-from farm.utils import convert_iob_to_simple_tags, span_to_string
+from farm.utils import convert_iob_to_simple_tags, try_get
 from farm.modeling.predictions import QACandidate, QAPred
 
 logger = logging.getLogger(__name__)
@@ -92,6 +88,8 @@ class PredictionHead(nn.Module):
         """
         config = {}
         for key, value in self.__dict__.items():
+            if type(value) is np.ndarray:
+                value = value.tolist()
             if is_json(value) and key[0] != "_":
                 config[key] = value
         config["name"] = self.__class__.__name__
@@ -278,7 +276,13 @@ class TextClassificationHead(PredictionHead):
         self.num_labels = self.layer_dims[-1]
         self.ph_output_type = "per_sequence"
         self.model_type = "text_classification"
-        self.task_name = task_name  # used for connecting with the right output of the processor
+
+        self.task_name = task_name #used for connecting with the right output of the processor
+
+        if type(class_weights) is np.ndarray and class_weights.ndim != 1:
+            raise ValueError("When you pass `class_weights` as `np.ndarray` it must have 1 dimension! "
+                             "You provided {} dimensions.".format(class_weights.ndim))
+
         self.class_weights = class_weights
 
         if class_weights is not None:
@@ -337,9 +341,6 @@ class TextClassificationHead(PredictionHead):
 
     def logits_to_loss(self, logits, **kwargs):
         label_ids = kwargs.get(self.label_tensor_name)
-        # In Natural Questions, each dev sample can have multiple labels
-        # For loss calculation we only use the first label
-        label_ids = label_ids.narrow(1, 0, 1)
         return self.loss_fct(logits, label_ids.view(-1))
 
     def logits_to_probs(self, logits, **kwargs):
@@ -374,22 +375,20 @@ class TextClassificationHead(PredictionHead):
             labels = [self.label_list[int(x[0])] for x in label_ids]
         return labels
 
-    def formatted_preds(self, logits=None, preds_p=None, samples=None, return_class_probs=False, **kwargs):
-        """ Like QuestionAnsweringHead.formatted_preds(), this fn can operate on either logits or preds_p. This
+    def formatted_preds(self, logits=None, preds=None, samples=None, return_class_probs=False, **kwargs):
+        """ Like QuestionAnsweringHead.formatted_preds(), this fn can operate on either logits or preds. This
         is needed since at inference, the order of operations is very different depending on whether we are performing
-        aggregation or not (compare Inferencer._get_predictions() vs Inferencer._get_predictions_and_aggregate())
+        aggregation or not (compare Inferencer._get_predictions() vs Inferencer._get_predictions_and_aggregate())"""
 
-        TODO: Preds_p should be renamed to preds"""
+        assert (logits is not None) or (preds is not None)
 
-        assert (logits is not None) or (preds_p is not None)
-
-        # When this method is used along side a QAHead at inference (e.g. Natural Questions), preds_p is the input and
+        # When this method is used along side a QAHead at inference (e.g. Natural Questions), preds is the input and
         # there is currently no good way of generating probs
         if logits is not None:
-            preds_p = self.logits_to_preds(logits)
+            preds = self.logits_to_preds(logits)
             probs = self.logits_to_probs(logits, return_class_probs)
         else:
-            probs = [None] * len(preds_p)
+            probs = [None] * len(preds)
 
         # TODO this block has to do with the difference in Basket and Sample structure between SQuAD and NQ
         try:
@@ -403,10 +402,10 @@ class TextClassificationHead(PredictionHead):
         if len(contexts_b) != 0:
             contexts = ["|".join([a, b]) for a, b in zip(contexts, contexts_b)]
 
-        assert len(preds_p) == len(probs) == len(contexts)
+        assert len(preds) == len(probs) == len(contexts)
 
         res = {"task": "text_classification", "predictions": []}
-        for pred, prob, context in zip(preds_p, probs, contexts):
+        for pred, prob, context in zip(preds, probs, contexts):
             if not return_class_probs:
                 pred_dict = {
                     "start": None,
@@ -1151,16 +1150,16 @@ class QuestionAnsweringHead(PredictionHead):
                                                       answer_type="span",
                                                       offset_unit="token",
                                                       aggregation_level="passage",
-                                                      sample_idx=sample_idx))
+                                                      passage_id=sample_idx))
 
         no_answer_score = start_end_matrix[0, 0].item()
         top_candidates.append(QACandidate(offset_answer_start=0,
                                           offset_answer_end=0,
                                           score=no_answer_score,
-                                          answer_type="is_impossible",
+                                          answer_type="no_answer",
                                           offset_unit="token",
                                           aggregation_level="passage",
-                                          sample_idx=None))
+                                          passage_id=None))
 
         return top_candidates
 
@@ -1200,11 +1199,11 @@ class QuestionAnsweringHead(PredictionHead):
             return False
         return True
 
-    def formatted_preds(self, logits=None, preds_p=None, baskets=None, **kwargs):
-        """ Takes a list of predictions, each corresponding to one sample, and converts them into document level
+    def formatted_preds(self, logits=None, preds=None, baskets=None, **kwargs):
+        """ Takes a list of passage level predictions, each corresponding to one sample, and converts them into document level
         predictions. Leverages information in the SampleBaskets. Assumes that we are being passed predictions from
         ALL samples in the one SampleBasket i.e. all passages of a document. Logits should be None, because we have
-        already converted the logits to predictions before calling formatted_preds
+        already converted the logits to predictions before calling formatted_preds.
         (see Inferencer._get_predictions_and_aggregate()).
         """
 
@@ -1213,17 +1212,17 @@ class QuestionAnsweringHead(PredictionHead):
         # seq_2_start_t is the token index of the first token in passage relative to the input sequence (i.e. number of
         # special tokens and question tokens that come before the passage tokens)
         assert logits is None, "Logits are not None, something is passed wrongly into formatted_preds() in infer.py"
-        assert preds_p is not None, "No preds_p passed to formatted_preds()"
+        assert preds is not None, "No preds passed to formatted_preds()"
         samples = [s for b in baskets for s in b.samples]
-        ids = [s.id.split("-") for s in samples]
+        ids = [s.id for s in samples]
         passage_start_t = [s.features[0]["passage_start_t"] for s in samples]
         seq_2_start_t = [s.features[0]["seq_2_start_t"] for s in samples]
 
         # Aggregate passage level predictions to create document level predictions.
-        # This method assumes that all passages of each document are contained in preds_p
+        # This method assumes that all passages of each document are contained in preds
         # i.e. that there are no incomplete documents. The output of this step
         # are prediction spans
-        preds_d = self.aggregate_preds(preds_p, passage_start_t, ids, seq_2_start_t)
+        preds_d = self.aggregate_preds(preds, passage_start_t, ids, seq_2_start_t)
 
         assert len(preds_d) == len(baskets)
 
@@ -1241,61 +1240,38 @@ class QuestionAnsweringHead(PredictionHead):
 
         # Iterate over each set of document level prediction
         for pred_d, no_ans_gap, basket in zip(top_preds, no_ans_gaps, baskets):
-            # TODO the follow try catch is because of difference in Basket structure between NQ and SQuAD - resolve this!!!
-            # TODO This code is horrible - will be cleaned soon
 
-            # Unpack document offsets, clear text and squad_id
-            try:
-                token_offsets = basket.samples[0].tokenized["document_offsets"]  # NQ style
-            except KeyError:
-                token_offsets = basket.raw["document_offsets"]  # SQuAD style
+            # Unpack document offsets, clear text and id
+            token_offsets = basket.samples[0].tokenized["document_offsets"]
+            pred_id = basket.id_external if basket.id_external else basket.id_internal
 
-            try:
-                document_text = basket.raw["context"]  # SQuAD style
-            except KeyError:
-                try:
-                    document_text = basket.raw["text"]  # NQ style
-                except KeyError:
-                    document_text = basket.raw["document_text"]
+            # These options reflect the different input dicts that can be assigned to the basket
+            # before any kind of normalization or preprocessing can happen
+            question_names = ["question_text", "qas", "questions"]
+            doc_names = ["document_text", "context", "text"]
 
-            try:
-                question = basket.raw["questions"][0]  # SQuAD style
-            except KeyError:
-                try:
-                    question = basket.raw["qas"][0]  # NQ style
-                except KeyError:
-                    question = basket.raw["question_text"]
-
-            try:
-                question_id = basket.raw["squad_id"]
-            except KeyError:
-                question_id = None  # TODO add NQ id here
-
-            basket_id = basket.id
+            document_text = try_get(doc_names, basket.raw)
+            question = try_get(question_names, basket.raw)
 
             # Iterate over each prediction on the one document
             full_preds = []
-            for qa_answer, basket in zip(pred_d, baskets):
-                # This should be a method of Span
-                pred_str, _, _ = span_to_string(qa_answer.offset_answer_start,
-                                                qa_answer.offset_answer_end,
-                                                token_offsets,
-                                                document_text)
-                qa_answer.add_answer(pred_str)
-                full_preds.append(qa_answer)
-            n_samples = full_preds[0].n_samples_in_doc
-            curr_doc_pred = QAPred(id=basket_id,
+            for qa_candidate in pred_d:
+                pred_str, _, _ = qa_candidate.span_to_string(token_offsets, document_text)
+                qa_candidate.add_answer(pred_str)
+                full_preds.append(qa_candidate)
+            n_samples = full_preds[0].n_passages_in_doc
+
+            curr_doc_pred = QAPred(id=pred_id,
+
                                    prediction=full_preds,
                                    context=document_text,
                                    question=question,
-                                   question_id=question_id,
                                    token_offsets=token_offsets,
                                    context_window_size=self.context_window_size,
                                    aggregation_level="document",
-                                   answer_types=[],  # TODO
                                    no_answer_gap=no_ans_gap,
-                                   n_samples=n_samples
-                                   )
+                                   n_passages=n_samples)
+
             ret.append(curr_doc_pred)
         return ret
 
@@ -1316,10 +1292,11 @@ class QuestionAnsweringHead(PredictionHead):
         all_basket_preds = {}
         all_basket_labels = {}
 
-        # Iterate over the preds of each sample
+        # Iterate over the preds of each sample - remove final number which is the sample id and not needed for aggregation
         for sample_idx in range(n_samples):
-            id_1, id_2, _ = ids[sample_idx]
-            basket_id = f"{id_1}-{id_2}"
+            basket_id = ids[sample_idx]
+            basket_id = basket_id.split("-")[:-1]
+            basket_id = "-".join(basket_id)
 
             # curr_passage_start_t is the token offset of the current passage
             # It will always be a multiple of doc_stride
@@ -1394,16 +1371,16 @@ class QuestionAnsweringHead(PredictionHead):
         # Get all predictions in flattened list and sort by score
         pos_answers_flat = []
         for sample_idx, passage_preds in enumerate(preds):
-            for qa_answer in passage_preds:
-                if not (qa_answer.offset_answer_start == -1 and qa_answer.offset_answer_end == -1):
-                    pos_answers_flat.append(QACandidate(offset_answer_start=qa_answer.offset_answer_start,
-                                                        offset_answer_end=qa_answer.offset_answer_end,
-                                                        score=qa_answer.score,
-                                                        answer_type=qa_answer.answer_type,
+            for qa_candidate in passage_preds:
+                if not (qa_candidate.offset_answer_start == -1 and qa_candidate.offset_answer_end == -1):
+                    pos_answers_flat.append(QACandidate(offset_answer_start=qa_candidate.offset_answer_start,
+                                                        offset_answer_end=qa_candidate.offset_answer_end,
+                                                        score=qa_candidate.score,
+                                                        answer_type=qa_candidate.answer_type,
                                                         offset_unit="token",
                                                         aggregation_level="passage",
-                                                        sample_idx=sample_idx,
-                                                        n_samples_in_doc=n_samples)
+                                                        passage_id=str(sample_idx),
+                                                        n_passages_in_doc=n_samples)
                                             )
 
         # TODO add switch for more variation in answers, e.g. if varied_ans then never return overlapping answers
@@ -1413,7 +1390,7 @@ class QuestionAnsweringHead(PredictionHead):
         no_ans_gap = -min([nas - pbs for nas, pbs in zip(no_answer_scores, passage_best_score)])
 
         # "no answer" scores and positive answers scores are difficult to compare, because
-        # + a positive answer score is related to a specific text qa_answer
+        # + a positive answer score is related to a specific text qa_candidate
         # - a "no answer" score is related to all input texts
         # Thus we compute the "no answer" score relative to the best possible answer and adjust it by
         # the most significant difference between scores.
@@ -1423,11 +1400,11 @@ class QuestionAnsweringHead(PredictionHead):
         no_answer_pred = QACandidate(offset_answer_start=-1,
                                      offset_answer_end=-1,
                                      score=best_overall_positive_score - no_ans_gap,
-                                     answer_type="is_impossible",
+                                     answer_type="no_answer",
                                      offset_unit="token",
                                      aggregation_level="document",
-                                     sample_idx=None,
-                                     n_samples_in_doc=n_samples)
+                                     passage_id=None,
+                                     n_passages_in_doc=n_samples)
 
         # Add no answer to positive answers, sort the order and return the n_best
         n_preds = [no_answer_pred] + pos_answer_dedup
@@ -1524,7 +1501,7 @@ class QuestionAnsweringHead(PredictionHead):
     @staticmethod
     def merge_formatted_preds(preds_all):
         """ Merges results from the two prediction heads used for NQ style QA. Takes the prediction from QA head and
-        assigns it the appropriate classification label. This mapping is achieved through sample_idx.
+        assigns it the appropriate classification label. This mapping is achieved through passage_id.
         preds_all should contain [QuestionAnsweringHead.formatted_preds(), TextClassificationHead()]. The first item
         of this list should be of len=n_documents while the second item should be of len=n_passages"""
 
@@ -1541,23 +1518,23 @@ class QuestionAnsweringHead(PredictionHead):
 
         cls_preds = preds_all[1][0]["predictions"]
         qa_preds = preds_all[0][0]
-        samples_per_doc = [doc_pred.n_samples for doc_pred in preds_all[0][0]]
+        samples_per_doc = [doc_pred.n_passages for doc_pred in preds_all[0][0]]
         cls_preds_grouped = chunk(cls_preds, samples_per_doc)
 
-        for qa_doc_pred, cls_preds in zip(qa_preds, cls_preds_grouped):
-            pred_qa_answers = qa_doc_pred.prediction
-            pred_qa_answers_new = []
-            for pred_qa_answer in pred_qa_answers:
-                sample_idx = pred_qa_answer.sample_idx
-                if sample_idx is not None:
-                    cls_pred = cls_preds[sample_idx]["label"]
-                # i.e. if is_impossible
+        for qa_pred, cls_preds in zip(qa_preds, cls_preds_grouped):
+            qa_candidates = qa_pred.prediction
+            qa_candidates_new = []
+            for qa_candidate in qa_candidates:
+                passage_id = qa_candidate.passage_id
+                if passage_id is not None:
+                    cls_pred = cls_preds[int(passage_id)]["label"]
+                # i.e. if no_answer
                 else:
-                    cls_pred = "is_impossible"
-                pred_qa_answer.answer = cls_pred
-                pred_qa_answers_new.append(pred_qa_answer)
-            qa_doc_pred.prediction = pred_qa_answers_new
-            ret.append(qa_doc_pred)
+                    cls_pred = "no_answer"
+                qa_candidate.add_cls(cls_pred)
+                qa_candidates_new.append(qa_candidate)
+            qa_pred.prediction = qa_candidates_new
+            ret.append(qa_pred)
         return ret
 
 

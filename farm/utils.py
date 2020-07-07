@@ -74,8 +74,8 @@ def initialize_device_settings(use_cuda, local_rank=-1, use_amp=None):
         else:
             n_gpu = torch.cuda.device_count()
     else:
-        torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
+        torch.cuda.set_device(device)
         n_gpu = 1
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.distributed.init_process_group(backend="nccl")
@@ -112,6 +112,30 @@ class BaseMLLogger:
     @classmethod
     def log_params(cls, params):
         raise NotImplementedError()
+
+
+class StdoutLogger(BaseMLLogger):
+    """ Minimal logger printing metrics and params to stdout.
+    Useful for services like AWS SageMaker, where you parse metrics from the actual logs"""
+
+    def init_experiment(self, experiment_name, run_name=None, nested=True):
+        logger.info(f"\n **** Starting experiment '{experiment_name}' (Run: {run_name})  ****")
+
+    @classmethod
+    def log_metrics(cls, metrics, step):
+        logger.info(f"Logged metrics at step {step}: \n {metrics}")
+
+    @classmethod
+    def log_params(cls, params):
+        logger.info(f"Logged parameters: \n {params}")
+
+    @classmethod
+    def log_artifacts(cls, dir_path, artifact_path=None):
+        raise NotImplementedError
+
+    @classmethod
+    def end_run(cls):
+        logger.info(f"**** End of Experiment **** ")
 
 
 class MLFlowLogger(BaseMLLogger):
@@ -400,27 +424,12 @@ def stack(list_of_lists):
             ret[i] += (x)
     return ret
 
-def span_to_string(start_t, end_t, token_offsets, clear_text):
 
-    # If it is a no_answer prediction
-    if start_t == -1 and end_t == -1:
-        return "", 0, 0
-
-    n_tokens = len(token_offsets)
-
-    # We do this to point to the beginning of the first token after the span instead of
-    # the beginning of the last token in the span
-    end_t += 1
-
-    # Predictions sometimes land on the very final special token of the passage. But there are no
-    # special tokens on the document level. We will just interpret this as a span that stretches
-    # to the end of the document
-    end_t = min(end_t, n_tokens)
-
-    start_ch = token_offsets[start_t]
-    # i.e. pointing at the END of the last token
-    if end_t == n_tokens:
-        end_ch = len(clear_text)
-    else:
-        end_ch = token_offsets[end_t]
-    return clear_text[start_ch: end_ch].strip(), start_ch, end_ch
+def try_get(keys, dictionary):
+    for key in keys:
+        if key in dictionary:
+            ret = dictionary[key]
+            if type(ret) == list:
+                ret = ret[0]
+            return ret
+    return None

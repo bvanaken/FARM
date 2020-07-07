@@ -6,6 +6,7 @@ import random
 import tarfile
 import tempfile
 import string
+from contextlib import ExitStack
 from itertools import islice
 from pathlib import Path
 
@@ -27,6 +28,8 @@ DOWNSTREAM_TASK_MAP = {
     "germeval18": "https://s3.eu-central-1.amazonaws.com/deepset.ai-farm-downstream/germeval18.tar.gz",
 
     "squad20": "https://s3.eu-central-1.amazonaws.com/deepset.ai-farm-downstream/squad20.tar.gz",
+    "covidqa": "https://s3.eu-central-1.amazonaws.com/deepset.ai-farm-downstream/covidqa.tar.gz",
+
     "conll03detrain": "https://raw.githubusercontent.com/MaviccPRP/ger_ner_evals/master/corpora/conll2003/deu.train",
     "conll03dedev": "https://raw.githubusercontent.com/MaviccPRP/ger_ner_evals/master/corpora/conll2003/deu.testa", #https://www.clips.uantwerpen.be/conll2003/ner/000README says testa is dev data
     "conll03detest": "https://raw.githubusercontent.com/MaviccPRP/ger_ner_evals/master/corpora/conll2003/deu.testb",
@@ -339,7 +342,7 @@ def _conll03get(dataset, directory, language):
 
 
 
-def read_docs_from_txt(filename, delimiter="", encoding="utf-8", max_docs=None, proxies=None):
+def read_docs_from_txt(filename, delimiter="", encoding="utf-8", max_docs=None, proxies=None, disable_tqdm=True):
     """Reads a text file with one sentence per line and a delimiter between docs (default: empty lines) ."""
     if not (os.path.exists(filename)):
         _download_extract_downstream_data(filename, proxies)
@@ -350,7 +353,7 @@ def read_docs_from_txt(filename, delimiter="", encoding="utf-8", max_docs=None, 
     corpus_lines = 0
 
     with open(filename, "r", encoding=encoding) as f:
-        for line_num, line in enumerate(tqdm(f, desc="Loading Dataset", total=corpus_lines)):
+        for line_num, line in enumerate(tqdm(f, desc="Loading Dataset", total=corpus_lines, disable=disable_tqdm)):
             line = line.strip()
             if line == delimiter:
                 if len(doc) > 0:
@@ -363,7 +366,7 @@ def read_docs_from_txt(filename, delimiter="", encoding="utf-8", max_docs=None, 
                             logger.info(f"Reached number of max_docs ({max_docs}). Skipping rest of file ...")
                             break
                 else:
-                    logger.warning(f"Found empty document in file (line {line_num}). "
+                    logger.warning(f"Found empty document in '{filename}' (line {line_num}). "
                                    f"Make sure that you comply with the format: "
                                    f"One sentence per line and exactly *one* empty line between docs. "
                                    f"You might have multiple subsequent empty lines.")
@@ -721,7 +724,7 @@ def grouper(iterable, n, worker_id=0, total_workers=1):
     Output for worker 2: [(dictC, dictD), (dictI, dictJ), ...]
     Output for worker 3: [(dictE, dictF), (dictK, dictL), ...]
 
-    This method also adds an index number to every dict yielded similar to the grouper().
+    This method also adds an index number to every dict yielded.
 
     :param iterable: a generator object that yields dicts
     :type iterable: generator
@@ -763,6 +766,37 @@ def grouper(iterable, n, worker_id=0, total_workers=1):
 
     return iter(lambda: list(islice(iterable, n)), [])
 
+
+def split_file(filepath, output_dir, docs_per_file=1_000, delimiter="", encoding="utf-8"):
+    total_lines = sum(1 for line in open(filepath, encoding=encoding))
+    output_file_number = 1
+    doc_count = 0
+    lines_to_write = []
+    with ExitStack() as stack:
+        input_file = stack.enter_context(open(filepath, 'r', encoding=encoding))
+        for line_num, line in enumerate(tqdm(input_file, desc="Splitting file ...", total=total_lines)):
+            lines_to_write.append(line)
+            if line.strip() == delimiter:
+                doc_count += 1
+                if doc_count % docs_per_file == 0:
+                    filename = output_dir / f"part_{output_file_number}"
+                    os.makedirs(os.path.dirname(filename), exist_ok=True)
+                    write_file = stack.enter_context(open(filename, 'w+', buffering=10 * 1024 * 1024))
+                    write_file.writelines(lines_to_write)
+                    write_file.close()
+                    output_file_number += 1
+                    lines_to_write = []
+
+        if lines_to_write:
+            filename = output_dir / f"part_{output_file_number}"
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            write_file = stack.enter_context(open(filename, 'w+', buffering=10 * 1024 * 1024))
+            write_file.writelines(lines_to_write)
+            write_file.close()
+
+    logger.info(f"The input file {filepath} is split in {output_file_number} parts at {output_dir}.")
+
+
 def generate_tok_to_ch_map(text):
     """ Generates a mapping from token to character index when a string text is split using .split()
     TODO e.g."""
@@ -778,6 +812,7 @@ def generate_tok_to_ch_map(text):
                 follows_whitespace = True
     return map
 
+
 def split_with_metadata(text):
     """" Splits a string text by whitespace and also returns indexes which is a mapping from token index
     to character index"""
@@ -787,27 +822,11 @@ def split_with_metadata(text):
     return split_text, indexes
 
 
-def convert_id(id_string):
-    """
-    Splits a string id into parts. If it is an id generated in the SQuAD pipeline it simple splits the id by the dashes
-    and converts the parts to ints. If it is generated by the non-SQuAD pipeline, it splits the id by the dashes and
-    converts references to "train" or "infer" into ints.
-    :param id_string:
-    :return:
-    """
-    ret = []
-    datasets = ["train", "infer"]
-    id_list = id_string.split("-")
-    for x in id_list:
-        if x in datasets:
-            ret.append(datasets.index(x))
-        else:
-            ret.append(int(x))
-    return ret
-
 def convert_qa_input_dict(infer_dict):
     """ Input dictionaries in QA can either have ["context", "qas"] (internal format) as keys or
-    ["text", "questions"] (api format). This function converts the latter into the former"""
+    ["text", "questions"] (api format). This function converts the latter into the former. It also converts the
+    is_impossible field to answer_type so that NQ and SQuAD dicts have the same format.
+    """
     try:
         # Check if infer_dict is already in internal json format
         if "context" in infer_dict and "qas" in infer_dict:
@@ -819,15 +838,10 @@ def convert_qa_input_dict(infer_dict):
         qas = [{"question": q,
                 "id": None,
                 "answers": [],
-                "is_impossible": False} for i, q in enumerate(questions)]
+                "answer_type": None} for i, q in enumerate(questions)]
         converted = {"qas": qas,
                      "context": text,
                      "document_id":document_id}
         return converted
     except KeyError:
         raise Exception("Input does not have the expected format")
-
-
-
-
-
